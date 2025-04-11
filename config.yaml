@@ -1,5 +1,5 @@
 bbox: [-122.1934736, 39.9067157, -122.0413752, 40.0750623]
-output_dir: 'C:\adh_data\bathy_inversion\mlc_test'
+output_dir: 'C:\data\mlc_test'
 loc_tag: 'california_river'
 
 dem:
