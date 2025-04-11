@@ -76,24 +76,42 @@ class MLCPipeline:
         # --- DEM retrieval and processing ---
         logging.info("Retrieving DEM tiles...")
         dem_data = self.dem_handler.get_dem(used_scale)
-        dem_data_smooth = self.dem_handler.smooth_dem(dem_data)
+        dem_data_float = dem_data.astype(np.float32)
+        dem_data_smooth = self.dem_handler.smooth_dem(dem_data_float)
         self.dem_handler.save_dem(dem_data, dem_data_smooth, output_dir=str(self.subdir))
+        logging.info(f"DEM data type: {dem_data_smooth.dtype}")
+
+        water_pixels = dem_data_smooth[mlc_mask > 0]
+        if water_pixels.size > 0:
+            avg_water_level = np.min(water_pixels)
+        else:
+            logging.warning("No water pixels found in DEM for average water level. Using 0.")
+            avg_water_level = 0
+        logging.info(f"Average water elevation computed: {avg_water_level}")
         
-        # --- Mesh building ---
-        logging.info("Building advanced-front mesh...")
-        adv_mesh, face_materials = self.mesh_builder.build_adv_front_mesh(mlc_mask, dem_data)
+        # 2. Create a modified DEM: Set DEM values inside the water mask to the average water level.
+        modified_dem = dem_data_smooth.copy()
+        modified_dem[mlc_mask > 0] = avg_water_level
         
+        # 3. Dilate the water mask to include additional shoreline.
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        shoreline_dilation_iterations = self.config.get("shoreline_dilation_iterations", 20)
+        shoreline_mask = cv2.dilate(mlc_mask, kernel, iterations=shoreline_dilation_iterations)
+        
+        # 4. Use the expanded shoreline mask and the modified DEM for mesh building.
+        logging.info("Building advanced-front mesh with extra shoreline information...")
+        adv_mesh, face_materials = self.mesh_builder.build_adv_front_mesh(shoreline_mask, modified_dem)
+
         # --- Georeference mesh ---
         logging.info("Georeferencing mesh...")
+        # Use the original mask dimensions (mlc_mask) for width and height.
         mask_height, mask_width = mlc_mask.shape
         geo_mesh = self.mesh_builder.georeference(adv_mesh, self.bbox, mask_width, mask_height, self.target_epsg)
         
         # --- Save the final mesh ---
         mesh_path = self.subdir / "mesh.3dm"
         self.mesh_builder.save_mesh(geo_mesh, face_materials, str(mesh_path))
-        
-        logging.info("Pipeline complete!")
-        logging.info(f"Chosen UTM EPSG code: {self.target_epsg}")
+        logging.info(f"Saved final mesh to {mesh_path}")
 
 def main():
     import argparse

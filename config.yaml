@@ -13,5 +13,5 @@ classification:
   num_samples: 10000
 
 meshing:
-  size: 50
-  keep_fraction: 0.15
+  size: 1
+

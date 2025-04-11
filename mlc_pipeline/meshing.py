@@ -11,68 +11,66 @@ from pyproj import Transformer, CRS as projCRS
 class MeshBuilder:
     def __init__(self, config):
         self.size = config.get("size", 50)
-        self.keep_fraction = config.get("keep_fraction", 0.15)
 
+    def extract_corners(self, contour, epsilon_factor=None):
+        """
+        Extract corners using polygon approximation.
+        contour: an Nx1x2 (or Nx2) array of contour points.
+        epsilon_factor: fraction of the contour perimeter to use as approximation accuracy.
+                        Defaults to self.epsilon_factor.
+        Returns an Nx2 array with the corner points.
+        """
+        if epsilon_factor is None:
+            epsilon_factor = self.epsilon_factor
+        if contour.ndim == 2:
+            contour = contour.reshape((-1, 1, 2))
+        perimeter = cv2.arcLength(contour, True)
+        epsilon = epsilon_factor * perimeter
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        corners = approx.squeeze()
+        if corners.ndim == 1:
+            corners = corners[np.newaxis, :]
+        return corners
 
-
-    def smooth_contour_fourier(self, contour, keep_fraction=None):
-        if keep_fraction is None:
-            keep_fraction = self.keep_fraction
-        N = len(contour)
-        complex_contour = contour[:, 0] + 1j * contour[:, 1]
-        fft_coeff = np.fft.fft(complex_contour)
-        cutoff = int(np.ceil(keep_fraction * N))
-        fft_filtered = np.zeros_like(fft_coeff)
-        fft_filtered[:cutoff] = fft_coeff[:cutoff]
-        fft_filtered[-cutoff:] = fft_coeff[-cutoff:]
-        smoothed = np.column_stack((np.real(np.fft.ifft(fft_filtered)), np.imag(np.fft.ifft(fft_filtered))))
-        return smoothed
-
-    def preserve_boundary_points(self, original, smoothed, mask_shape, tol=1e-3):
+    def preserve_boundary_points(self, approximated, mask_shape, tol=1e-3):
+        """
+        Adjust approximated corner points if they are close to the mask boundary.
+        For each approximated point, if it is within tol of a boundary (0 or width-1/height-1),
+        set it exactly to the boundary coordinate.
+        """
         h, w = mask_shape[:2]
-        corrected = smoothed.copy()
-        for i in range(len(original)):
-            if abs(original[i, 0]) < tol or abs(original[i, 0] - (w - 1)) < tol:
-                corrected[i, 0] = original[i, 0]
-            if abs(original[i, 1]) < tol or abs(original[i, 1] - (h - 1)) < tol:
-                corrected[i, 1] = original[i, 1]
+        corrected = approximated.copy()
+        for i in range(len(approximated)):
+            x, y = approximated[i]
+            if abs(x) < tol:
+                corrected[i, 0] = 0
+            if abs(x - (w - 1)) < tol:
+                corrected[i, 0] = w - 1
+            if abs(y) < tol:
+                corrected[i, 1] = 0
+            if abs(y - (h - 1)) < tol:
+                corrected[i, 1] = h - 1
         return corrected
 
+    def save_debug_contour(self, binary_mask, contour, output_path):
+        """
+        Saves a debug image showing the binary mask with the given contour overlaid.
+        """
+        plt.figure(figsize=(10, 10))
+        plt.imshow(binary_mask, cmap="gray")
+        if contour.ndim != 2:
+            contour = contour.reshape((-1, 2))
+        plt.plot(contour[:, 0], contour[:, 1], 'r-', linewidth=2, label="Extracted Contour")
+        plt.legend()
+        plt.gca().invert_yaxis()
+        plt.title("Extracted Outer Contour")
+        plt.xlabel("X (pixels)")
+        plt.ylabel("Y (pixels)")
+        plt.savefig(output_path, dpi=300)
+        plt.close()
+        logging.info(f"Debug contour image saved to {output_path}")
 
-    def smooth_polygon_fourier(self, poly, keep_fraction=0.1, image_shape=None):
-        if keep_fraction is None:
-            keep_fraction = self.keep_fraction
-        """
-        Apply Fourier smoothing on polygon boundaries.
-        """
-        exterior_coords = np.array(poly.exterior.coords)
-        smoothed_exterior = self.smooth_contour_fourier(exterior_coords, keep_fraction=keep_fraction)
-        if image_shape is not None:
-            smoothed_exterior = self.preserve_boundary_points(exterior_coords, smoothed_exterior, image_shape)
-        interiors = []
-        for interior in poly.interiors:
-            interior_coords = np.array(interior.coords)
-            smoothed_interior = self.smooth_contour_fourier(interior_coords, keep_fraction=keep_fraction)
-            if image_shape is not None:
-                smoothed_interior = self.preserve_boundary_points(interior_coords, smoothed_interior, image_shape)
-            interiors.append(smoothed_interior.tolist())
-        return Polygon(smoothed_exterior.tolist(), holes=interiors)
-
-    def build_adv_front_mesh(self, binary_mask, dem_data, size=50, keep_fraction=0.1, 
-                         save_contour_plots=False, original_contour_path=None, fft_contour_path=None):
-        """
-        Builds an advanced mesh by:
-          - Dilating the binary mask.
-          - Extracting the largest water contour and its holes.
-          - Applying Fourier smoothing to the contour.
-          - Triangulating the smoothed polygon.
-          - Lifting vertices to 3D using the DEM.
-          
-        If save_contour_plots is True and paths are provided, it will save:
-          - The original extracted contour.
-          - The Fourier-smoothed contour.
-        """
-        print("Building advanced front mesh...")
+    def build_adv_front_mesh(self, binary_mask, dem_data, size=50):
         mask_bin = (binary_mask > 0).astype(np.uint8)
         cross_kernel = np.array([[0, 1, 0],
                                  [1, 1, 1],
@@ -94,34 +92,11 @@ class MeshBuilder:
         if not np.array_equal(outer_contour[0], outer_contour[-1]):
             outer_contour = np.vstack([outer_contour, outer_contour[0]])
         
-        # Apply Fourier smoothing and then preserve boundary points.
-        smoothed_outer = self.smooth_contour_fourier(outer_contour, keep_fraction=keep_fraction)
-        smoothed_outer = self.preserve_boundary_points(outer_contour, smoothed_outer, mask_bin.shape)
-        
-        # Save contour plots if requested.
-        if save_contour_plots:
-            if original_contour_path is not None:
-                print(f"Saving original contour plot to {original_contour_path}...")
-                plt.figure(figsize=(8, 6))
-                plt.plot(outer_contour[:, 0], outer_contour[:, 1], 'b-')
-                plt.gca().invert_yaxis()
-                plt.xlabel("X (pixels)")
-                plt.ylabel("Y (pixels)")
-                plt.title("Original Contour")
-                plt.savefig(original_contour_path, dpi=500)
-                plt.close()
-            if fft_contour_path is not None:
-                print(f"Saving Fourier-smoothed contour plot to {fft_contour_path}...")
-                plt.figure(figsize=(8, 6))
-                plt.plot(smoothed_outer[:, 0], smoothed_outer[:, 1], 'r-')
-                plt.gca().invert_yaxis()
-                plt.xlabel("X (pixels)")
-                plt.ylabel("Y (pixels)")
-                plt.title("Fourier Smoothed Contour")
-                plt.savefig(fft_contour_path, dpi=500)
-                plt.close()
-        
-        # Get holes from child contours.
+        # Instead of extracting approximated corners and saving debug plots,
+        # we simply use the outer_contour directly.
+        exterior = outer_contour.tolist()
+
+        # Process holes as in the original code.
         def get_child_indices(parent_idx, hierarchy):
             children = []
             child_idx = hierarchy[parent_idx][2]
@@ -144,11 +119,10 @@ class MeshBuilder:
             if mask_bin[cy, cx] == 0:
                 if not np.array_equal(cnt[0], cnt[-1]):
                     cnt = np.vstack([cnt, cnt[0]])
-                smoothed_hole = self.smooth_contour_fourier(cnt, keep_fraction=keep_fraction)
-                smoothed_hole = self.preserve_boundary_points(cnt, smoothed_hole, mask_bin.shape)
-                holes_coords.append(smoothed_hole)
+                # For holes, you can choose to extract corners or use the raw contour.
+                # Here, we use the raw contour.
+                holes_coords.append(cnt)
         
-        exterior = smoothed_outer.tolist()
         poly_kwargs = {}
         if holes_coords:
             poly_kwargs['holes'] = [hole.tolist() for hole in holes_coords]
@@ -158,12 +132,7 @@ class MeshBuilder:
         if water_poly.geom_type == 'MultiPolygon':
             water_poly = max(water_poly.geoms, key=lambda p: p.area)
         
-        # Apply Fourier smoothing to the polygon boundaries.
-        water_poly = self.smooth_polygon_fourier(water_poly, keep_fraction=keep_fraction, image_shape=mask_bin.shape)
-        
-        # Convert the polygon (with holes) into a PSLG.
         def polygon_to_pslg_with_holes(polygon):
-            # Get exterior coordinates (making sure the polygon is closed).
             exterior_coords = np.array(polygon.exterior.coords[:-1], dtype=np.float64)
             vertices = exterior_coords.copy()
             n_exterior = len(exterior_coords)
@@ -173,7 +142,6 @@ class MeshBuilder:
             for interior in polygon.interiors:
                 inter_coords = np.array(interior.coords[:-1], dtype=np.float64)
                 n_interior = len(inter_coords)
-                # Skip degenerate interiors.
                 if n_interior < 3:
                     continue
                 vertices = np.vstack([vertices, inter_coords])
@@ -184,17 +152,14 @@ class MeshBuilder:
                 holes.append([hole_pt.x, hole_pt.y])
                 offset += n_interior
             return vertices, segments, holes
-    
-        vertices, segments, holes = polygon_to_pslg_with_holes(water_poly)
         
-        # Prepare the PSLG dictionary.
+        vertices, segments, holes = polygon_to_pslg_with_holes(water_poly)
         pslg = dict(vertices=vertices, segments=segments, holes=holes)
-        triangulation_opts = f'pq30a{size}'
+        triangulation_opts = f'pq30a{self.size}'
         triangulation = triangle.triangulate(pslg, triangulation_opts)
         mesh_vertices = triangulation.get('vertices', np.empty((0, 2), dtype=np.float64))
         mesh_triangles = triangulation.get('triangles', np.empty((0, 3), dtype=np.int32))
         
-        # Lift vertices to 3D using the DEM.
         vertices_3d = []
         H_dem, W_dem = dem_data.shape
         for v in mesh_vertices:
@@ -210,11 +175,11 @@ class MeshBuilder:
             def __init__(self, vertices, faces):
                 self.vertices = vertices
                 self.faces = faces
-    
+        
         adv_mesh = SimpleMesh(vertices_3d, mesh_triangles)
         face_materials = np.ones(mesh_triangles.shape[0], dtype=int)
         
-        # (Optional) Visualize the mask contours.
+        # (Optional: Remove or comment out this visualization if not needed)
         mask_vis = (mask_bin * 255).astype('uint8')
         contours_vis, _ = cv2.findContours(mask_vis.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         mask_rgb = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR)
@@ -225,7 +190,6 @@ class MeshBuilder:
         plt.close()
         
         return adv_mesh, face_materials
-
 
 
     def georeference(self, mesh, bbox, width, height, target_epsg):

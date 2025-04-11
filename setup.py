@@ -5,8 +5,8 @@ setup(
     name="mlc_pipeline",
     version="0.1.0",
     description="A modular processing pipeline for Sentinel-2 composites, DEM retrieval, classification, and meshing.",
-    author="Your Name",
-    author_email="you@example.com",
+    author="Will McKelvey",
+    author_email="william.d.mckelvey@usace.army.mil",
     packages=find_packages(),
     install_requires=[
         "numpy",
