@@ -1,0 +1,17 @@
+bbox: [-122.1934736, 39.9067157, -122.0413752, 40.0750623]
+output_dir: 'C:\adh_data\bathy_inversion\mlc_test'
+loc_tag: 'california_river'
+
+dem:
+  n_subboxes: 10
+  sigma: 3
+
+sentinel:
+  num_samples: 10
+
+classification:
+  num_samples: 10000
+
+meshing:
+  size: 50
+  keep_fraction: 0.15
