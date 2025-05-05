@@ -1,6 +1,8 @@
-bbox: [-122.1934736, 39.9067157, -122.0413752, 40.0750623]
+bbox: [-91.7635618, 31.1946563, -91.7035031, 31.2287368]
 output_dir: 'C:\data\mlc_test'
-loc_tag: 'california_river'
+loc_tag: 'red_river'
+project_name: "water-seg-wdm230"
+dilation_iterations: 10
 
 dem:
   n_subboxes: 10
@@ -13,5 +15,12 @@ classification:
   num_samples: 10000
 
 meshing:
-  size: 1
+  size: 50
+  smoothing_iterations: 10
+
+hotstart:
+  enabled: true              # turn on hotstart generation
+  mode: wse             # treat ‘value’ as the depth to apply everywhere
+  value: 5                   # constant water depth = 5 m (i.e. water surface elevation)
+  use_initial_velocity: false
 
