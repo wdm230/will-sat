@@ -109,11 +109,12 @@ class MLCPipeline:
         out_bc = self.bc_builder.build(str(bc_path), boundary_loops)
         logging.info(f"Boundary conditions written to {out_bc}")
 
+        logging.info("Found %d boundary loop(s).", len(boundary_loops))
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Run the MLC Pipeline.")
-    parser.add_argument("--config", type=str, default="config.yaml")
+    parser.add_argument("--config", type=str, default="..\config.yaml")
     parser.add_argument("--log", type=str, default="pipeline.log")
     args = parser.parse_args()
     setup_logger(log_file=args.log)

@@ -36,13 +36,29 @@ class BCBuilder:
         for key, vals in self.cfg.get('global_material', {}).items():
             f.write(f"MP {key} {' '.join(map(str, vals))}\n")
         f.write('\n')
-
+        
     def _write_materials(self, f):
+        """
+        Write out MP cards grouped by region, with a blank line
+        between each region’s block.
+        Expects cfg['materials'] as:
+          region_id:
+            - type: XXX
+              params: [...]
+            - type: YYY
+              params: [...]
+        """
         f.write('! Material Properties\n')
-        for m in self.cfg.get('material', []):
-            vals = ' '.join(map(str, m['params']))
-            f.write(f"MP {m['type']} {m['region']} {vals}\n")
+        mbR = self.cfg.get('materials', {})
+        for region, mats in mbR.items():
+            for m in mats:
+                params = ' '.join(map(str, m['params']))
+                f.write(f"MP {m['type']} {int(region)} {params}\n")
+            # blank line after each region block
+            f.write('\n')
+        # extra blank line before next section
         f.write('\n')
+
 
     def _write_iteration(self, f):
         f.write('! Iteration Parameters\n')
@@ -92,8 +108,7 @@ class BCBuilder:
 
         f.write('\n')
 
-
-
+    
     def _write_time_series(self, f):
         ts_list = self.cfg.get('time_series', [])
         if not ts_list:
@@ -101,10 +116,10 @@ class BCBuilder:
     
         f.write('! Time Series\n')
         for ts in ts_list:
-            # allow both new and old key names:
+            # pick up your BC-series identifiers
             stype    = ts.get('series_type',
-                        ts.get('bc_type',     # alternative key?
-                        ts.get('type_id', 1)))# fallback default
+                        ts.get('bc_type',
+                        ts.get('type_id', 1)))
             sid      = ts.get('id',
                         ts.get('series_id'))
             in_units = ts.get('in_units',
@@ -112,14 +127,34 @@ class BCBuilder:
             out_units= ts.get('out_units',
                         ts.get('output_units', 0))
     
-            # your old code may have called it 'data'
-            points   = ts.get('points',
-                        ts.get('data', []))
+            # either a list of [t,v] pairs or a path to a text file
+            raw = ts.get('points',
+                  ts.get('data', []))
     
-            npts = len(points)
+            # if it's a filename, read it in
+            if isinstance(raw, str):
+                file_path = Path(raw)
+                pts = []
+                with file_path.open() as fp:
+                    for line in fp:
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        parts = line.split()
+                        if len(parts) < 2:
+                            continue
+                        t, v = map(float, parts[:2])
+                        pts.append((t, v))
+            else:
+                # assume iterable of two-tuples
+                pts = [(float(t), float(v)) for t, v in raw]
+    
+            npts = len(pts)
             f.write(f"XY1 {stype} {sid} {npts} {in_units} {out_units}\n")
-            for t, v in points:
+            for t, v in pts:
                 f.write(f"{t:.2f} {v:.2f}\n")
+            
+            f.write("\n")
         f.write('\n')
 
 

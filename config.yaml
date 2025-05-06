@@ -5,50 +5,39 @@ project_name: "water-seg-wdm230"
 dilation_iterations: 10
 
 dem:
-  n_subboxes: 5
+  n_subboxes: 10
   sigma: 2
 
 sentinel:
-  num_samples: 5
+  num_samples: 10
 
 classification:
   num_samples: 5000
 
 meshing:
   size: 50
-  smoothing_iterations: 10
+  smoothing_iterations: 2
 
 hotstart:
-  enabled: true              # turn on hotstart generation
-  mode: constant_depth            # treat ‘value’ as the depth to apply everywhere
-  value: 5                   # constant water depth = 5 m (i.e. water surface elevation)
+  enabled: true             
+  mode: constant_depth            
+  value: 5                  
   use_initial_velocity: false
 
 boundary:
   global_material:
-    G: [9.80665]
+    G: [9.81]
     RHO: [1000]
     MU: [1e-6]
     MUC: [1.0]
-  material:
-    - type: EVS
-      region: 1
-      params: [0.005, 0.005, 0.0]
-    - type: ML
-      region: 1
-      params: [4]
-    - type: SRT
-      region: 1
-      params: [1e-4]
-    - type: EVS
-      region: 2
-      params: [0.005, 0.005, 0.0]
-    - type: ML
-      region: 2
-      params: [4]
-    - type: SRT
-      region: 2
-      params: [1e-4]
+  materials:
+    1:
+      - type: EVS
+        params: [0.005,0.005,0.0]
+      - type: ML
+        params: [4]
+      - type: SRT
+        params: [1e-4]
   iteration:
     NIT: [6]
     MIT: [100]
@@ -62,13 +51,15 @@ boundary:
   boundary_strings:
     MTS:
       - [1, 1]
-      - [2, 2]
   time_series:
     - type: XY1
       id: 1
+      data: 'C:\data\mlc_test\red_river\ts.txt'
+    - type: XY1
+      id: 2
       data:
-        - [0.0, 0.0]
-        - [3600, 1.5]
+       -  [0.0, 0.0]
+       -  [1000.0, 10.0]
   nb:
     OTW: [1]
   friction:
