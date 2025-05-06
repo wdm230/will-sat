@@ -106,24 +106,161 @@ def smooth_mask_with_laplacian(mask, iterations=5, lambda_val=0.2, threshold_val
     
     return binary_smoothed
 
+def cluster_boundary_segments(segs):
+    """
+    Given an array of segments [[n0,n1],...], return a list of lists of
+    segment‐indices where each sub‐list is one connected boundary chain.
+    """
+    # build adjacency: segment i connects to j if they share a node
+    N = len(segs)
+    adj = {i:set() for i in range(N)}
+    for i,(a,b) in enumerate(segs):
+        for j,(c,d) in enumerate(segs):
+            if j <= i: continue
+            if a in (c,d) or b in (c,d):
+                adj[i].add(j)
+                adj[j].add(i)
 
-def get_boundary_nodes(self):
-    """Return sorted unique node indices on the boundary."""
-    segs = getattr(self, 'boundary_segments', None)
-    if segs is None:
-        raise ValueError("boundary_segments not defined. Run build_adv_front_mesh first.")
-    nodes = np.unique(segs.flatten())
-    return nodes
+    seen = set()
+    clusters = []
+    for i in range(N):
+        if i in seen: continue
+        # flood‐fill from i
+        stack = [i]
+        comp  = []
+        while stack:
+            u = stack.pop()
+            if u in seen: continue
+            seen.add(u)
+            comp.append(u)
+            stack.extend(adj[u] - seen)
+        clusters.append(comp)
+    return clusters
 
-def get_boundary_elements(self, mesh):
-    """Return element indices that share at least one boundary edge."""
-    segs = self.boundary_segments
-    # build a set of frozenset edges for quick lookup
-    b_edges = set(map(lambda e: tuple(sorted(e)), segs.tolist()))
+def cluster_boundary_segments(segs):
+    """
+    Cluster a list of segments [[n0,n1],...] into connected chains.
+    Returns a list of lists of segment-indices for each chain.
+    """
+    N = len(segs)
+    adj = {i: set() for i in range(N)}
+    for i, (a, b) in enumerate(segs):
+        for j, (c, d) in enumerate(segs):
+            if j <= i:
+                continue
+            if a in (c, d) or b in (c, d):
+                adj[i].add(j)
+                adj[j].add(i)
+    seen = set()
+    clusters = []
+    for i in range(N):
+        if i in seen:
+            continue
+        stack = [i]
+        comp = []
+        while stack:
+            u = stack.pop()
+            if u in seen:
+                continue
+            seen.add(u)
+            comp.append(u)
+            stack.extend(adj[u] - seen)
+        clusters.append(comp)
+    return clusters
+
+
+def get_boundary_nodes(boundary_segments):
+    """
+    Return sorted unique node indices on the boundary.
+
+    Parameters:
+    - boundary_segments: np.ndarray of shape (M,2) of node index pairs
+    """
+    if boundary_segments is None:
+        raise ValueError("boundary_segments must be provided.")
+    return np.unique(boundary_segments.flatten())
+
+
+def get_boundary_elements(boundary_segments, mesh):
+    """
+    Return element indices that share at least one boundary edge.
+
+    Parameters:
+    - boundary_segments: np.ndarray of shape (M,2)
+    - mesh: object with .faces attribute, array of shape (E,3)
+    """
+    if boundary_segments is None:
+        raise ValueError("boundary_segments must be provided.")
+    # build set of edges
+    b_edges = set(map(lambda e: tuple(sorted(e)), boundary_segments.tolist()))
     boundary_elems = []
     for eid, face in enumerate(mesh.faces):
-        # check each edge of the triangle
         edges = [tuple(sorted((face[i], face[(i+1)%3]))) for i in range(3)]
-        if any(e in b_edges for e in edges):
+        if any(edge in b_edges for edge in edges):
             boundary_elems.append(eid)
     return np.array(boundary_elems, dtype=int)
+
+
+def get_all_boundary_loops(boundary_segments: np.ndarray, mesh):
+    """
+    Return a list of (nodes, elements) tuples for each contiguous boundary loop.
+
+    boundary_segments: (M,2) array of node index pairs
+    mesh.faces:      (E,3) array of node‐triplets for each triangular element
+    """
+    if boundary_segments is None:
+        raise ValueError("boundary_segments must be provided.")
+
+    # 1) Build node‐adjacency graph from the segments
+    node_graph = {}
+    for a, b in boundary_segments:
+        node_graph.setdefault(int(a), set()).add(int(b))
+        node_graph.setdefault(int(b), set()).add(int(a))
+
+    visited = set()
+    loops = []
+
+    # 2) For each unvisited node, flood‐fill its connected component
+    for start in node_graph:
+        if start in visited:
+            continue
+
+        comp_nodes = set([start])
+        stack = [start]
+        visited.add(start)
+
+        while stack:
+            u = stack.pop()
+            for v in node_graph[u]:
+                if v not in visited:
+                    visited.add(v)
+                    comp_nodes.add(v)
+                    stack.append(v)
+
+        comp_nodes = sorted(comp_nodes)
+        comp_nodes_arr = np.array(comp_nodes, dtype=int)
+
+        # 3) Pick out exactly those segments whose both ends are in this component
+        comp_segs = [
+            (int(a), int(b))
+            for a, b in boundary_segments
+            if a in comp_nodes and b in comp_nodes
+        ]
+        # Build a set of “boundary edges” for lookup
+        b_edges = {tuple(sorted(seg)) for seg in comp_segs}
+
+        # 4) Find all mesh elements that have at least one of those edges
+        elems = []
+        for eid, face in enumerate(mesh.faces):
+            # each face contributes three edges
+            face_edges = [
+                tuple(sorted((int(face[i]), int(face[(i+1) % 3]))))
+                for i in range(3)
+            ]
+            if any(edge in b_edges for edge in face_edges):
+                elems.append(eid)
+
+        loops.append((comp_nodes_arr, np.array(elems, dtype=int)))
+
+    return loops
+

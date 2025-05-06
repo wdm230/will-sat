@@ -6,12 +6,14 @@ import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 
-from mlc_pipeline.utils import auto_utm_epsg, setup_logger, split_bbox
+from mlc_pipeline.utils import auto_utm_epsg, setup_logger, split_bbox, get_all_boundary_loops
 from mlc_pipeline.dem import DEMHandler
 from mlc_pipeline.sentinel import SentinelHandler
 from mlc_pipeline.classification import Classifier
 from mlc_pipeline.meshing import MeshBuilder
-from mlc_pipeline.hotstart import generate_hotstart
+from mlc_pipeline.hotstart import HotstartBuilder
+from mlc_pipeline.bc_maker import BCBuilder
+
 
 class MLCPipeline:
     def __init__(self, config, config_path):
@@ -30,7 +32,9 @@ class MLCPipeline:
         self.sentinel_handler = SentinelHandler(self.bbox, config.get("sentinel", {}))
         self.classifier = Classifier(config.get("classification", {}))
         self.mesh_builder = MeshBuilder(config.get("meshing", {}))
-
+        self.hotstart_builder = HotstartBuilder(config.get("hotstart", {}))
+        self.bc_builder = BCBuilder(config.get("boundary", {}))
+        
     def run(self):
         logging.info("Authenticating Earth Engine (if required)...")
         ee.Authenticate()
@@ -83,11 +87,6 @@ class MLCPipeline:
         adv_mesh, face_mats = self.mesh_builder.build_adv_front_mesh(shore_mask, modified_dem)
         geo_mesh = self.mesh_builder.georeference(adv_mesh, self.bbox, w_mask, h_mask, self.target_epsg)
 
-        # Boundary reporting
-        boundary_nodes = self.mesh_builder.get_boundary_nodes()
-        boundary_elems = self.mesh_builder.get_boundary_elements(geo_mesh)
-        logging.info(f"Boundary node indices: {boundary_nodes}")
-        logging.info(f"Boundary element indices: {boundary_elems}")
 
         # Save mesh
         mesh_path = self.subdir / "mesh.3dm"
@@ -96,10 +95,19 @@ class MLCPipeline:
 
         # Generate hotstart
         if self.config.get('hotstart', {}).get('enabled', False):
-            hot_path = self.subdir / "hotstart.hot"
             logging.info("Generating hotstart file...")
-            out_hot = generate_hotstart(self.config_path, hot_path)
+            out_hot = self.hotstart_builder.build(str(mesh_path))
             logging.info(f"Hotstart file created at {out_hot}")
+        
+        
+        segs = self.mesh_builder.boundary_segments
+        
+        # now get all loops
+        boundary_loops = get_all_boundary_loops(segs, adv_mesh)
+        # write your BC file
+        bc_path = self.subdir / "boundary.bc"
+        out_bc = self.bc_builder.build(str(bc_path), boundary_loops)
+        logging.info(f"Boundary conditions written to {out_bc}")
 
 
 def main():
