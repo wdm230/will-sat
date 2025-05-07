@@ -15,9 +15,13 @@ classification:
   num_samples: 5000
 
 meshing:
-  size: 50
-  smoothing_iterations: 2
+  size: 20.0
+  smoothing_iterations: 10
+  chaikin_alpha:       0.5    
+  resample_len_frac:   0.10   
+  boundary_tol: 7.5
 
+  
 hotstart:
   enabled: true             
   mode: constant_depth            

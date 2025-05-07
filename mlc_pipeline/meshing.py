@@ -11,7 +11,9 @@ class MeshBuilder:
         self.dilation_iterations = config.get("dilation_iterations", 2)
         self.smoothing_iterations = config.get("smoothing_iterations", 2)
         self.boundary_tol = config.get("boundary_tol", 10)
-
+        self.chaikin_alpha = config.get("chaikin_alpha", 0.25)
+        self.resample_len_frac = config.get("resample_len_frac", 0.15)
+        
     def preserve_boundary_points(self, contour, mask_shape, tol=None):
         if tol is None:
             tol = self.boundary_tol
@@ -44,21 +46,27 @@ class MeshBuilder:
         return resamp
 
     def chaikin_smoothing(self, contour, iterations=1):
-        coords = contour.tolist()
-        if coords[0] != coords[-1]:
-            coords.append(coords[0])
+        alpha = self.chaikin_alpha
+        target_spacing = self.size * self.resample_len_frac
+
+        # ensure closed
+        if not np.allclose(contour[0], contour[-1]):
+            contour = np.vstack([contour, contour[0]])
+
         for _ in range(iterations):
-            new_coords = []
-            for i in range(len(coords) - 1):
-                p0 = np.array(coords[i])
-                p1 = np.array(coords[i + 1])
-                Q = 0.75 * p0 + 0.25 * p1
-                R = 0.25 * p0 + 0.75 * p1
-                new_coords.extend([Q.tolist(), R.tolist()])
-            if new_coords and new_coords[0] != new_coords[-1]:
-                new_coords.append(new_coords[0])
-            coords = new_coords
-        return np.array(coords)
+            new = []
+            for p0, p1 in zip(contour, contour[1:]):
+                Q = (1-alpha)*p0 + alpha*p1
+                R = alpha*p0 + (1-alpha)*p1
+                new.append(Q); new.append(R)
+            # re-close
+            new = np.vstack(new)
+            if not np.allclose(new[0], new[-1]):
+                new = np.vstack([new, new[0]])
+            # re-resample so points stay evenly spaced
+            contour = self.resample_contour(new, target_spacing)
+
+        return contour
 
     def polygon_to_pslg_with_holes(self, polygon: Polygon):
         ext = np.array(polygon.exterior.coords[:-1], dtype=float)
@@ -101,12 +109,24 @@ class MeshBuilder:
             c = hierarchy[idx][2]
             while c != -1:
                 yield c; c = hierarchy[c][0]
+            # after you've defined `children` and before building the Polygon…
+
         hole_loops = []
         for cid in children(outer):
             loop = contours[cid].squeeze().astype(float)
-            if not np.array_equal(loop[0], loop[-1]):
+            if not np.allclose(loop[0], loop[-1]):
                 loop = np.vstack([loop, loop[0]])
+    
+            # — apply the same smoothing pipeline to the interior loop —
+            if self.smoothing_iterations > 0:
+                loop = self.chaikin_smoothing(loop,
+                                              iterations=self.smoothing_iterations)
+            loop = self.resample_contour(loop,
+                                         target_spacing=self.size * self.resample_len_frac)
+            loop = self.preserve_boundary_points(loop, mask_shape)
+    
             hole_loops.append(loop)
+
         poly = Polygon(ext.tolist(), [hl.tolist() for hl in hole_loops])
         if not poly.is_valid:
             poly = poly.buffer(0)
@@ -153,3 +173,60 @@ class MeshBuilder:
                 n1, n2, n3 = face + 1
                 f.write(f"E3T {eid} {n1} {n2} {n3} {mat}\n")
         logging.info(f"Saved mesh to {output_path}")
+        
+    def get_boundary_loops(self, mesh, mask_shape, tol=None, gap_tol=None):
+        """
+        Return a list of (node_list, None) for each contiguous stretch of
+        vertices touching any of the four image edges.  If the mask
+        touches the same side in multiple disjoint parts, each becomes
+        its own loop.
+    
+        - tol: how close to x=0/W-1 or y=0/H-1 counts as “on the edge”
+        - gap_tol: max allowed gap between successive sorted coords before
+                   splitting into a new loop.  Defaults to ~1.5×your resample spacing.
+        """
+        if tol is None:
+            tol = self.boundary_tol
+        H, W = mask_shape
+    
+        # pick out the x,y coords
+        verts = mesh.vertices[:, :2]
+        xs, ys = verts[:,0], verts[:,1]
+    
+        # default gap tolerance ≈ 1.5× your contour resample spacing
+        if gap_tol is None:
+            gap_tol = self.size * self.resample_len_frac * 1.5
+    
+        loops = []
+        # for each side: (name, boolean‐mask, sorter, which coord to check)
+        sides = [
+            ('left',   xs <=     tol, lambda idx: idx[np.argsort(ys[idx])], ys),
+            ('bottom', ys >= (H-1)-tol, lambda idx: idx[np.argsort(xs[idx])], xs),
+            ('right',  xs >= (W-1)-tol, lambda idx: idx[np.argsort(-ys[idx])], ys),
+            ('top',    ys <=     tol, lambda idx: idx[np.argsort(-xs[idx])], xs),
+        ]
+    
+        for side, m, sorter, coord in sides:
+            idxs = np.nonzero(m)[0]
+            if idxs.size < 2:
+                continue
+            sorted_idxs = sorter(idxs)
+    
+            # split into clusters whenever gap > gap_tol
+            clusters = []
+            current = [sorted_idxs[0]]
+            for prev, cur in zip(sorted_idxs, sorted_idxs[1:]):
+                if abs(coord[cur] - coord[prev]) <= gap_tol:
+                    current.append(cur)
+                else:
+                    if len(current) >= 2:
+                        clusters.append(current)
+                    current = [cur]
+            if len(current) >= 2:
+                clusters.append(current)
+    
+            # record each run as its own loop
+            for c in clusters:
+                loops.append((c, None))
+    
+        return loops

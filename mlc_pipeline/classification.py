@@ -19,7 +19,7 @@ class Classifier:
         logging.info("Performing Maximum Likelihood Classification (MLC)...")
         red_channel = merged_image[:, :, 0]
         blue_channel = merged_image[:, :, 2]
-        water_candidate = (blue_channel > 200) & (blue_channel != red_channel)
+        water_candidate = (blue_channel > 225) & (blue_channel != red_channel)
         nonwater_candidate = ~water_candidate
     
         water_indices = np.argwhere(water_candidate)

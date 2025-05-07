@@ -103,8 +103,8 @@ class BCBuilder:
             string_id = max_mts_id + loop_idx
             arr = np.asarray(nodes, dtype=int)
             # pair arr[0]→arr[1], arr[1]→arr[2], … arr[-2]→arr[-1]
-            for n1, n2 in zip(arr[:-1], arr[1:]):
-                f.write(f"EGS {n1} {n2} {string_id}\n")
+            for n1, n2 in zip(arr, arr[1:]):
+                f.write(f"EGS {n1+1} {n2+1} {string_id}\n")
 
         f.write('\n')
 

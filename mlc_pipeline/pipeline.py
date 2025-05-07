@@ -5,15 +5,16 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import cv2
 import numpy as np
+import shutil
 
-from mlc_pipeline.utils import auto_utm_epsg, setup_logger, split_bbox, get_all_boundary_loops
+from mlc_pipeline.utils import auto_utm_epsg, setup_logger, split_bbox, copy_config_file
 from mlc_pipeline.dem import DEMHandler
 from mlc_pipeline.sentinel import SentinelHandler
 from mlc_pipeline.classification import Classifier
 from mlc_pipeline.meshing import MeshBuilder
 from mlc_pipeline.hotstart import HotstartBuilder
 from mlc_pipeline.bc_maker import BCBuilder
-
+from mlc_pipeline.metadata import MeshMetadata
 
 class MLCPipeline:
     def __init__(self, config, config_path):
@@ -52,7 +53,11 @@ class MLCPipeline:
                              for arr in arrays])
         used_scale = min(scale for (_, _, _, scale) in sampled)
         plt.imsave(str(self.subdir / "merged_sentinel_mndwi.png"), merged)
-
+        
+        dest_config = self.subdir / f"{self.loc_tag}.yaml"
+        shutil.copy(self.config_path, dest_config)
+        logging.info(f"Copied config to {dest_config}")
+        
         # --- Classification ---
         mlc_mask = self.classifier.classify(merged, output_dir=str(self.subdir))
 
@@ -79,37 +84,48 @@ class MLCPipeline:
         modified_dem = dem_smooth.copy()
         modified_dem[rows, cols] = avg_level
 
-        # Shoreline mask
-        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        shore_mask = cv2.dilate(mlc_mask, kern, iterations=self.dilation_iterations)
-
         # Build mesh
-        adv_mesh, face_mats = self.mesh_builder.build_adv_front_mesh(shore_mask, modified_dem)
+        adv_mesh, face_mats = self.mesh_builder.build_adv_front_mesh(mlc_mask, modified_dem)
+        
+        boundary_loops = self.mesh_builder.get_boundary_loops(
+        adv_mesh, 
+        mask_shape=(h_mask, w_mask)
+        )
+        logging.info(f"# of loops: {len(boundary_loops)}")
+        
+        bc_path = self.subdir / f"{self.loc_tag}.bc"
+        self.bc_builder.build(str(bc_path), boundary_loops)
+        logging.info(f"Wrote {len(boundary_loops)} boundary‐loop strings to {bc_path}")
+        
         geo_mesh = self.mesh_builder.georeference(adv_mesh, self.bbox, w_mask, h_mask, self.target_epsg)
 
 
         # Save mesh
-        mesh_path = self.subdir / "mesh.3dm"
+        mesh_path = self.subdir / f"{self.loc_tag}.3dm"
         self.mesh_builder.save_mesh(geo_mesh, face_mats, str(mesh_path))
         logging.info(f"Saved mesh to {mesh_path}")
 
+
+        meta = MeshMetadata(
+        geo_mesh,
+        epsg=self.target_epsg,
+        loc_tag=self.loc_tag,
+        project_name=self.project_name
+        )
+        meta_file = meta.write_txt(self.subdir)
+        logging.info(f"Mesh metadata written to {meta_file}")
+
         # Generate hotstart
         if self.config.get('hotstart', {}).get('enabled', False):
-            logging.info("Generating hotstart file...")
-            out_hot = self.hotstart_builder.build(str(mesh_path))
+            hot_builder = HotstartBuilder(self.config.get('hotstart', {}))
+            out_hot = hot_builder.build(
+                geo_mesh,
+                output_path=str(self.subdir / f"{self.loc_tag}.hot")
+            )
             logging.info(f"Hotstart file created at {out_hot}")
         
-        
-        segs = self.mesh_builder.boundary_segments
-        
-        # now get all loops
-        boundary_loops = get_all_boundary_loops(segs, adv_mesh)
-        # write your BC file
-        bc_path = self.subdir / "boundary.bc"
-        out_bc = self.bc_builder.build(str(bc_path), boundary_loops)
-        logging.info(f"Boundary conditions written to {out_bc}")
 
-        logging.info("Found %d boundary loop(s).", len(boundary_loops))
+
 
 def main():
     import argparse
