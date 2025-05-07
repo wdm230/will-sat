@@ -1,6 +1,6 @@
-bbox: [-91.7635618, 31.1946563, -91.7035031, 31.2287368]
+bbox: [30.4915914, 50.3830092, 30.6491348, 50.4960033]
 output_dir: 'C:\data\mlc_test'
-loc_tag: 'red_river'
+loc_tag: 'europe'
 project_name: "water-seg-wdm230"
 dilation_iterations: 10
 
@@ -19,7 +19,7 @@ meshing:
   smoothing_iterations: 10
   chaikin_alpha:       0.5    
   resample_len_frac:   0.10   
-  boundary_tol: 7.5
+  boundary_tol: 5.0
 
   
 hotstart:

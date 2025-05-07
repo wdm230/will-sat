@@ -4,6 +4,8 @@ import triangle as tr
 import logging
 from shapely.geometry import Polygon
 from pyproj import Transformer, CRS as projCRS
+from collections import Counter
+
 
 class MeshBuilder:
     def __init__(self, config):
@@ -174,59 +176,93 @@ class MeshBuilder:
                 f.write(f"E3T {eid} {n1} {n2} {n3} {mat}\n")
         logging.info(f"Saved mesh to {output_path}")
         
-    def get_boundary_loops(self, mesh, mask_shape, tol=None, gap_tol=None):
+    def get_boundary_loops(self, mesh, mask_shape, tol=None):
         """
-        Return a list of (node_list, None) for each contiguous stretch of
-        vertices touching any of the four image edges.  If the mask
-        touches the same side in multiple disjoint parts, each becomes
-        its own loop.
-    
-        - tol: how close to x=0/W-1 or y=0/H-1 counts as “on the edge”
-        - gap_tol: max allowed gap between successive sorted coords before
-                   splitting into a new loop.  Defaults to ~1.5×your resample spacing.
+        Returns a list of (node_index_list, None) for each connected
+        chain of mesh-boundary edges that touch the image border.
+        Nodes are ordered in the actual edge-connectivity sequence.
         """
         if tol is None:
             tol = self.boundary_tol
         H, W = mask_shape
-    
-        # pick out the x,y coords
+        
+        # 1) find which vertices lie on the image edge
         verts = mesh.vertices[:, :2]
-        xs, ys = verts[:,0], verts[:,1]
-    
-        # default gap tolerance ≈ 1.5× your contour resample spacing
-        if gap_tol is None:
-            gap_tol = self.size * self.resample_len_frac * 1.5
-    
-        loops = []
-        # for each side: (name, boolean‐mask, sorter, which coord to check)
-        sides = [
-            ('left',   xs <=     tol, lambda idx: idx[np.argsort(ys[idx])], ys),
-            ('bottom', ys >= (H-1)-tol, lambda idx: idx[np.argsort(xs[idx])], xs),
-            ('right',  xs >= (W-1)-tol, lambda idx: idx[np.argsort(-ys[idx])], ys),
-            ('top',    ys <=     tol, lambda idx: idx[np.argsort(-xs[idx])], xs),
+        xs, ys    = verts[:,0], verts[:,1]
+        on_border = set(np.nonzero(
+            (xs <= tol) |
+            (xs >= (W-1)-tol) |
+            (ys <= tol) |
+            (ys >= (H-1)-tol)
+        )[0])
+        
+        # 2) gather mesh edges (from triangles)
+        edge_list = []
+        for tri in mesh.faces:
+            # tri is [i0,i1,i2]
+            for a,b in ((0,1),(1,2),(2,0)):
+                i,j = tri[a], tri[b]
+                edge_list.append(tuple(sorted((i,j))))
+        # count them
+        edge_count = Counter(edge_list)
+        
+        # 3) pick only those edges that:
+        #    a) are boundary‐edges in the mesh (count == 1)
+        #    b) both endpoints are on the image border
+        boundary_edges = [
+            (i,j) for (i,j),c in edge_count.items()
+            if c==1 and i in on_border and j in on_border
         ]
-    
-        for side, m, sorter, coord in sides:
-            idxs = np.nonzero(m)[0]
-            if idxs.size < 2:
+        
+        # 4) build adjacency
+        adj = {}
+        for i,j in boundary_edges:
+            adj.setdefault(i, []).append(j)
+            adj.setdefault(j, []).append(i)
+        
+        # 5) find connected components and walk each one
+        loops = []
+        visited = set()
+        for start in adj:
+            if start in visited:
                 continue
-            sorted_idxs = sorter(idxs)
-    
-            # split into clusters whenever gap > gap_tol
-            clusters = []
-            current = [sorted_idxs[0]]
-            for prev, cur in zip(sorted_idxs, sorted_idxs[1:]):
-                if abs(coord[cur] - coord[prev]) <= gap_tol:
-                    current.append(cur)
-                else:
-                    if len(current) >= 2:
-                        clusters.append(current)
-                    current = [cur]
-            if len(current) >= 2:
-                clusters.append(current)
-    
-            # record each run as its own loop
-            for c in clusters:
-                loops.append((c, None))
-    
+        
+            # collect component
+            comp = set()
+            stack = [start]
+            while stack:
+                u = stack.pop()
+                if u in comp:
+                    continue
+                comp.add(u)
+                for v in adj[u]:
+                    if v not in comp:
+                        stack.append(v)
+            visited |= comp
+        
+            # pick a chain – open if possible, else closed
+            ends = [u for u in comp if len(adj[u]) == 1]
+            root = ends[0] if ends else next(iter(comp))
+        
+            # traverse
+            seq = [root]
+            prev, cur = None, root
+            while True:
+                nbrs = [n for n in adj[cur] if n != prev]
+                if not nbrs:
+                    break
+                nxt = nbrs[0]
+                seq.append(nxt)
+                prev, cur = cur, nxt
+                # stop if we closed the loop
+                if cur == root:
+                    break
+        
+            # only keep chains of length ≥3, and strip off first & last
+            if len(seq) >= 3:
+                trimmed = seq
+                # you still need at least two nodes to emit any EGS
+                if len(trimmed) >= 2:
+                    loops.append((trimmed, None))
+        
         return loops
