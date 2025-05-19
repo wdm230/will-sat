@@ -113,6 +113,7 @@ class MLCPipeline:
         project_name=self.project_name
         )
         meta_file = meta.write_txt(self.subdir)
+        
         logging.info(f"Mesh metadata written to {meta_file}")
 
         # Generate hotstart
