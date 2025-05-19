@@ -96,6 +96,7 @@ class MeshBuilder:
             kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             mask_bin = cv2.dilate(mask_bin, kern, iterations=self.dilation_iterations)
         contours, hierarchy = cv2.findContours(mask_bin, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
         if not contours or hierarchy is None:
             raise ValueError("No contours found in mask")
         hierarchy = hierarchy[0]
