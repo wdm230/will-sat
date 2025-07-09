@@ -2,9 +2,11 @@ import logging
 import numpy as np
 import pygridgen
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
+from matplotlib.colors import ListedColormap
+import cv2
 import trimesh
 from pathlib import Path
-
 
 class SimpleMesh:
     def __init__(self, vertices, faces):
@@ -16,37 +18,68 @@ class CurviMeshBuilder:
         self.mbuilder = mesh_builder
         self.ni = config.get("ni", 20)
         self.nj = config.get("nj", 200)
-        logging.info(f"CurviMeshBuilder initialized with ni={self.ni}, nj={self.nj}")
+        self.boundary_tol = config.get("boundary_tol", 10)
+        self.interactive = config.get("interactive", False)
+        logging.info(
+            f"CurviMeshBuilder initialized with ni={self.ni}, nj={self.nj}, interactive={self.interactive}"
+        )
+        
+    def _interactive_pick_corners(self, contour, mask):
+        # create a larger figure by specifying figsize (width, height) in inches
+        fig, ax = plt.subplots(figsize=(10, 10))
+        cmap = ListedColormap(['white', 'blue'])
+        ax.imshow(mask, cmap=cmap, origin='upper')
+        ax.plot(contour[:,0], contour[:,1], 'o-', color='red', markersize=4)
+        selected = []
+        scatter = ax.scatter([], [], c='cyan', s=75, marker='o')
 
-    def _pick_corners(self, contour, mask_shape):
-        """
-        Locate the four image-corner points by closest distance to the exact border corners,
-        then sort them clockwise.
-        contour: (M+1,2) closed loop array
-        mask_shape: (height, width)
-        returns: list of 4 indices in contour (without final duplicate) in CW order
-        """
-        h, w = mask_shape
-        pts = contour[:-1]
-        exact = [(0,0), (w-1,0), (w-1,h-1), (0,h-1)]
-        corners = []
-        for (x0,y0) in exact:
-            d = np.hypot(pts[:,0]-x0, pts[:,1]-y0)
-            idx = int(np.argmin(d))
-            if d[idx] > 1e-3:
-                logging.warning(f"_pick_corners: using approximate corner at {pts[idx]} for target ({x0},{y0}), distance {d[idx]:.3f}")
-            corners.append(idx)
+        def onclick(event):
+            if event.button == 3 and event.xdata is not None and event.ydata is not None:
+                d = np.hypot(contour[:,0] - event.xdata, contour[:,1] - event.ydata)
+                idx = int(np.argmin(d))
+                if idx not in selected and len(selected) < 4:
+                    selected.append(idx)
+                    scatter.set_offsets(contour[selected])
+                    fig.canvas.draw()
+
+        def onundo(event):
+            if selected:
+                selected.pop()
+                scatter.set_offsets(contour[selected] if selected else np.empty((0,2)))
+                fig.canvas.draw()
+
+        def onkeypress(event):
+            if event.key == 'enter':
+                plt.close(fig)
+
+        ax_undo = plt.axes([0.8, 0.02, 0.1, 0.05])
+        btn_undo = Button(ax_undo, 'Undo')
+        btn_undo.on_clicked(onundo)
+
+        ax.set_title('Right-click to select 4 corners; press Enter to finish or close window when done')
+        fig.canvas.mpl_connect('button_press_event', onclick)
+        fig.canvas.mpl_connect('key_press_event', onkeypress)
+        plt.show()
+
+        if len(selected) != 4:
+            raise ValueError(f"Interactive selection requires exactly 4 points, got {len(selected)}")
+        logging.info(f"Interactive corners selected: {selected}")
+        return selected
+
+
+    def _order_corners_clockwise(self, contour, corners):
+        pts = contour[corners]
         centroid = pts.mean(axis=0)
-        angles = np.arctan2(pts[corners,1]-centroid[1], pts[corners,0]-centroid[0])
-        order = np.argsort(angles)
-        sorted_corners = [corners[i] for i in order]
-        logging.info(f"Picked corner indices (approx): {sorted_corners}")
-        return sorted_corners
+        angles = np.arctan2(pts[:,1] - centroid[1], pts[:,0] - centroid[0])
+        order = np.argsort(-angles)
+        ordered = [corners[i] for i in order]
+        logging.info(f"Ordered corners clockwise: {ordered}")
+        return ordered
 
     def _compute_shape(self, contour, corners):
         deltas = np.diff(contour, axis=0)
         seg_lengths = np.hypot(deltas[:,0], deltas[:,1])
-        cumlen = np.concatenate(([0], np.cumsum(seg_lengths)))
+        cumlen = np.concatenate(([0.0], np.cumsum(seg_lengths)))
         lengths = []
         for i in range(4):
             i0 = corners[i]
@@ -54,7 +87,7 @@ class CurviMeshBuilder:
             if i1 >= i0:
                 length = cumlen[i1] - cumlen[i0]
             else:
-                length = (cumlen[-1] - cumlen[i0]) + cumlen[i1]
+                length = cumlen[-1] - cumlen[i0] + cumlen[i1]
             lengths.append(length)
         logging.info(f"Side lengths: {lengths}")
         len_u = 0.5*(lengths[0] + lengths[2])
@@ -63,98 +96,171 @@ class CurviMeshBuilder:
         nv = self.nj if len_u < len_v else self.ni
         return nv, nu
 
-    def build(self, adv_mesh, avg_z, mask_shape):
-        """
-        Build a curvilinear mesh along the water contour only, ignoring loops on image borders.
-        """
-        # 1) Extract all boundary loops in pixel-space
-        loops = self.mbuilder.get_boundary_loops(adv_mesh, mask_shape)
-        h, w = mask_shape
-        # 2) Filter out loops touching the image border
-        interior = []
-        for loop, mats in loops:
-            coords = adv_mesh.vertices[loop, :2]
-            # keep only loops with all points strictly inside borders
-            if np.all((coords[:,0] > 0) & (coords[:,0] < w-1) &
-                      (coords[:,1] > 0) & (coords[:,1] < h-1)):
-                interior.append((loop, mats))
+    def build(self, adv_mesh, avg_z, mask):
+        # 1. Extract boundary contour from mask
+        mask_bin = (mask > 0).astype(np.uint8)
+        contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            raise ValueError("No contours found in mask for boundary extraction")
+        ext = max(contours, key=lambda c: len(c)).squeeze().astype(float)
+        if ext.ndim == 1:
+            ext = ext[np.newaxis, :]
+        if not np.allclose(ext[0], ext[-1]):
+            ext = np.vstack([ext, ext[0]])
+        contour = ext
 
-        # pick the longest interior loop
-        ext_loop, face_mats = max(interior, key=lambda lm: len(lm[0]))
+        # 2. Smooth contour while preserving edges
+        h_mask, w_mask = mask.shape
+        contour = self.mbuilder.chaikin_smoothing(contour, iterations=self.mbuilder.smoothing_iterations)
+        if not np.allclose(contour[0], contour[-1]):
+            contour[-1] = contour[0]
+        boundary_tol = getattr(self.mbuilder, 'boundary_tol', 1.0)
+        idx_edge = np.where(
+            (contour[:,0] <= boundary_tol) | (contour[:,0] >= w_mask-1-boundary_tol) |
+            (contour[:,1] <= boundary_tol) | (contour[:,1] >= h_mask-1-boundary_tol)
+        )[0]
+        for i in idx_edge:
+            x,y = contour[i]
+            x = 0.0 if x <= boundary_tol else (w_mask-1 if x >= w_mask-1-boundary_tol else x)
+            y = 0.0 if y <= boundary_tol else (h_mask-1 if y >= h_mask-1-boundary_tol else y)
+            contour[i] = [x,y]
+        if not np.allclose(contour[0], contour[-1]):
+            contour[-1] = contour[0]
 
-        # 3) Build closed contour array
-        contour = adv_mesh.vertices[ext_loop, :2]
+        # 3. Pick & order corners
+        if self.interactive:
+            corners = self._interactive_pick_corners(contour, mask)
+        else:
+            deltas = np.diff(contour, axis=0)
+            cumlen = np.concatenate(([0.0], np.cumsum(np.hypot(deltas[:,0], deltas[:,1]))))
+            total = cumlen[-1]
+            targets = [0.0, total*0.25, total*0.5, total*0.75]
+            corners = [int(np.argmin(np.abs(cumlen - t))) for t in targets]
+            logging.info(f"Picked corners at arc-length: {corners}")
+        corners = self._order_corners_clockwise(contour, corners)
+        if len(corners) != 4:
+            raise ValueError(f"Expected 4 corners, got {len(corners)}: {corners}")
+
+        # 4. Resample sides between corners
+        nv, nu = self._compute_shape(contour, corners)
+        side_counts = [nu, nv, nu, nv]
+        resamp = []
+        for i, count in enumerate(side_counts):
+            i0, i1 = corners[i], corners[(i+1)%4]
+            seg = contour[i0:i1+1] if i1>=i0 else np.vstack([contour[i0:], contour[:i1+1]])
+            ds = np.hypot(*(np.diff(seg,axis=0).T))
+            cum = np.concatenate(([0.0], np.cumsum(ds)))
+            samples = np.linspace(0, cum[-1], count+1)[:-1]
+            pts = []
+            for s in samples:
+                idx = np.searchsorted(cum, s)
+                if idx==0:
+                    pts.append(seg[0])
+                else:
+                    t0, t1 = cum[idx-1], cum[idx]
+                    p0, p1 = seg[idx-1], seg[idx]
+                    frac = (s-t0)/(t1-t0) if t1>t0 else 0.0
+                    pts.append(p0 + frac*(p1-p0))
+            resamp.append(np.array(pts))
+        contour = np.vstack(resamp)
         if not np.allclose(contour[0], contour[-1]):
             contour = np.vstack([contour, contour[0]])
+        logging.info(f"Contour resampled to {len(contour)} points")
 
-        # Pick corners by proximity to image corners
-        corners = self._pick_corners(contour, mask_shape)
-        beta = np.zeros(len(contour), dtype=float)
-        beta[corners] = 1.0
-        beta *= 4.0 / beta.sum()
-        
+                # 5. Compute new corner indices on the resampled contour
+        side_counts = [nu, nv, nu, nv]
+        new_corners = [
+            0,
+            side_counts[0],
+            side_counts[0] + side_counts[1],
+            side_counts[0] + side_counts[1] + side_counts[2]
+        ]
+        logging.info(f"New corner indices on resampled contour: {new_corners}")
+
+        # 6. Construct beta (integers) for Gridgen — no normalization needed
+        beta = np.zeros(len(contour), dtype=int)
+        for idx in new_corners:
+            beta[idx] = 1
+        # sum(beta) == 4 by construction
+
+        # Debug overlay
         plt.figure(figsize=(6,6))
-        plt.plot(contour[:,0], contour[:,1], '-o', markersize=2)
-        # highlight corners in red
-        corner_pts = contour[corners]
-        plt.plot(corner_pts[:,0], corner_pts[:,1], 'ro', markersize=5)
-        plt.axis('equal')
-        plt.title("Boundary Contour fed to pygridgen (corners in red)")
-        plt.savefig("boundary_debug.png", dpi=150)
+        cmap = ListedColormap(['white','blue'])
+        plt.imshow(mask, cmap=cmap, origin='upper')
+        plt.plot(contour[:,0], contour[:,1], 'o-', c='red', ms=3)
+        pts = contour[new_corners]
+        plt.scatter(pts[:,0], pts[:,1], c='cyan', s=75)
+        plt.axis('off')
+        plt.savefig('boundary_debug.png', dpi=150)
+        plt.close()
+        plt.figure(figsize=(6,6))
+        cmap = ListedColormap(['white','blue'])
+        plt.imshow(mask, cmap=cmap, origin='upper')
+        plt.plot(contour[:,0], contour[:,1], 'o-', c='red', ms=3)
+        pts = contour[new_corners]
+        plt.scatter(pts[:,0], pts[:,1], c='cyan', s=75)
+        plt.axis('off')
+        plt.savefig('boundary_debug.png', dpi=150)
         plt.close()
 
-        
-        # Compute grid shape and swap axes for pygridgen
-        nv, nu = self._compute_shape(contour, corners)
-        shape = (nu, nv)
-        logging.info(f"Calling pygridgen with shape (nx,ny): {shape}")
+        # Determine upper-left index for Gridgen (1-based)
+        ul_corner = int(np.argmin(contour[:,0] + contour[:,1]))
+        ul_idx = ul_corner + 1
 
-        # Centre coords to avoid overflow
+        # Generate grid
+        nu, nv = self._compute_shape(contour, new_corners)
+        shape = (nu, nv)
+        import time
+        logging.info(f"Calling pygridgen with shape {shape}, ul_idx={ul_idx}")
         centroid = contour.mean(axis=0)
         pts = contour - centroid
+        t0 = time.time()
+        grid = pygridgen.Gridgen(
+            pts[:,0], pts[:,1], beta,
+            shape=shape,
+            ul_idx=ul_idx,
+            nnodes=14,
+            precision=1e-6,
+            checksimplepoly=False,
+            verbose=True
+        )
+        t1 = time.time()
+        logging.info(f"pygridgen completed in {t1-t0:.3f}s")
 
-        # Build curvilinear grid
-        grid = pygridgen.Gridgen(pts[:,0], pts[:,1], beta, shape=shape)
         X = grid.x + centroid[0]
         Y = grid.y + centroid[1]
-        logging.info(f"Generated grid min/max X: {X.min()}/{X.max()}, Y: {Y.min()}/{Y.max()}")
+        Z = avg_z if not np.isscalar(avg_z) else np.full_like(X, avg_z)
 
-        # Handle Z (scalar or array)
-        if np.isscalar(avg_z):
-            Z = np.full_like(X, avg_z, dtype=float)
-        else:
-            Z = avg_z
-
-        # Assemble vertices and triangulate quads
+        # Triangulate
         verts = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
-        nx, ny = shape
+        ny_nodes, nx_nodes = X.shape
         faces = []
-        for i in range(ny-1):
-            for j in range(nx-1):
-                n0 = i*nx + j
+        for i in range(ny_nodes - 1):
+            for j in range(nx_nodes - 1):
+                n0 = i * nx_nodes + j
                 n1 = n0 + 1
-                n2 = n0 + nx
+                n2 = n0 + nx_nodes
                 n3 = n2 + 1
-                faces.append([n0, n2, n1])
-                faces.append([n1, n2, n3])
+                if (i + j) % 2 == 0:
+                    faces.append([n0, n2, n1])
+                    faces.append([n1, n2, n3])
+                else:
+                    faces.append([n0, n2, n3])
+                    faces.append([n0, n3, n1])
         faces = np.array(faces, dtype=int)
-
-        mesh = SimpleMesh(vertices=verts, faces=faces)
+        mesh = SimpleMesh(verts, faces)
         mats = np.ones(len(faces), dtype=int)
-        logging.info("CurviMeshBuilder.build: build complete")
+        logging.info("CurviMeshBuilder.build complete")
         return mesh, mats
 
     def georeference(self, mesh, bbox, width, height, epsg):
-        logging.info("CurviMeshBuilder.georeference: applying georeference")
         return self.mbuilder.georeference(mesh, bbox, width, height, epsg)
 
     def save(self, mesh, face_mats, path):
-        logging.info(f"CurviMeshBuilder.save: saving mesh to {path}")
         ext = Path(path).suffix.lower()
         if ext in ['.stl', '.obj']:
             tri = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
             tri.export(path)
-            logging.info(f"Exported mesh to {path}")
         else:
             self.mbuilder.save_mesh(mesh, face_mats, path)
-            logging.info(f"Saved mesh to {path}")
+        logging.info(f"Saved mesh to {path}")

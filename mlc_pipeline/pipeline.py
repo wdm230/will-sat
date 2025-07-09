@@ -15,7 +15,7 @@ from mlc_pipeline.meshing import MeshBuilder
 from mlc_pipeline.hotstart import HotstartBuilder
 from mlc_pipeline.bc_maker import BCBuilder
 from mlc_pipeline.metadata import MeshMetadata
-
+from mlc_pipeline.curvimesh import CurviMeshBuilder
 class MLCPipeline:
     def __init__(self, config, config_path):
         self.config = config
@@ -35,6 +35,8 @@ class MLCPipeline:
         self.mesh_builder = MeshBuilder(config.get("meshing", {}))
         self.hotstart_builder = HotstartBuilder(config.get("hotstart", {}))
         self.bc_builder = BCBuilder(config.get("boundary", {}))
+        self.curvi_builder = CurviMeshBuilder(self.mesh_builder, config.get("meshing", {}))
+        self.curvi_enabled = config.get("meshing", {}).get("curvi", True)
         
     def run(self):
         logging.info("Authenticating Earth Engine (if required)...")
@@ -84,21 +86,35 @@ class MLCPipeline:
         modified_dem = dem_smooth.copy()
         modified_dem[rows, cols] = avg_level
 
-        # Build mesh
+                # Build mesh
         adv_mesh, face_mats = self.mesh_builder.build_adv_front_mesh(mlc_mask, modified_dem)
-        
+        logging.info(f"Built advancing-front mesh with {len(adv_mesh.vertices)} vertices")
+
+        # If curvilinear meshing is enabled, convert to curvi mesh
+        if self.curvi_enabled:
+            logging.info("Building curvilinear mesh via pygridgen...")
+            mesh, face_mats = self.curvi_builder.build(
+                adv_mesh,
+                avg_level,
+                mlc_mask
+            )
+        else:
+            logging.info("Using regular advancing-front mesh")
+            mesh, face_mats = adv_mesh, face_mats
+
+        # Log boundary loops on final mesh
         boundary_loops = self.mesh_builder.get_boundary_loops(
-        adv_mesh, 
-        mask_shape=(h_mask, w_mask)
+            mesh,
+            mask_shape=(h_mask, w_mask)
         )
         logging.info(f"# of loops: {len(boundary_loops)}")
-        
-        bc_path = self.subdir / f"{self.loc_tag}.bc"
-        self.bc_builder.build(str(bc_path), boundary_loops)
-        logging.info(f"Wrote {len(boundary_loops)} boundary‐loop strings to {bc_path}")
-        
-        geo_mesh = self.mesh_builder.georeference(adv_mesh, self.bbox, w_mask, h_mask, self.target_epsg)
 
+        # Georeference mesh
+        geo_mesh = (
+            self.curvi_builder.georeference(mesh, self.bbox, w_mask, h_mask, self.target_epsg)
+            if self.curvi_enabled
+            else self.mesh_builder.georeference(mesh, self.bbox, w_mask, h_mask, self.target_epsg)
+        )
 
         # Save mesh
         mesh_path = self.subdir / f"{self.loc_tag}.3dm"
@@ -106,24 +122,29 @@ class MLCPipeline:
         logging.info(f"Saved mesh to {mesh_path}")
 
 
+        # Write metadata
         meta = MeshMetadata(
-        geo_mesh,
-        epsg=self.target_epsg,
-        loc_tag=self.loc_tag,
-        project_name=self.project_name
+            geo_mesh,
+            epsg=self.target_epsg,
+            loc_tag=self.loc_tag,
+            project_name=self.project_name
         )
         meta_file = meta.write_txt(self.subdir)
-        
         logging.info(f"Mesh metadata written to {meta_file}")
 
+
+        hotstart_path = self.subdir / f"{self.loc_tag}.hot"
         # Generate hotstart
         if self.config.get('hotstart', {}).get('enabled', False):
-            hot_builder = HotstartBuilder(self.config.get('hotstart', {}))
-            out_hot = hot_builder.build(
-                geo_mesh,
-                output_path=str(self.subdir / f"{self.loc_tag}.hot")
-            )
-            logging.info(f"Hotstart file created at {out_hot}")
+            # only pass mesh and output directory (or full path) to HotstartBuilder.build()
+            self.hotstart_builder.build(geo_mesh, hotstart_path)
+            logging.info("Hotstart files generated")
+        # Boundary conditions
+
+        if self.config.get('boundary', {}).get('enabled', False):
+            bc_path = self.subdir / f"{self.loc_tag}.bc"
+            self.bc_builder.build(geo_mesh, bc_path)
+            logging.info(f"Boundary conditions written to {bc_path}")
         
 
 

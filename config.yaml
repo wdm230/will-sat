@@ -1,6 +1,6 @@
-bbox: [30.4915914, 50.3830092, 30.6491348, 50.4960033]
-output_dir: 'C:\data\mlc_test'
-loc_tag: 'europe'
+bbox: [-91.7635618, 31.1946563, -91.7035031, 31.2287368]
+output_dir: '/home/will/Desktop'
+loc_tag: 'red_river'
 project_name: "water-seg-wdm230"
 dilation_iterations: 10
 
@@ -15,12 +15,15 @@ classification:
   num_samples: 5000
 
 meshing:
+  curvi: true
+  ni: 8
+  nj: 150
   size: 20.0
   smoothing_iterations: 10
   chaikin_alpha:       0.5    
   resample_len_frac:   0.10   
   boundary_tol: 5.0
-
+  interactive: true
   
 hotstart:
   enabled: true             
@@ -29,6 +32,7 @@ hotstart:
   use_initial_velocity: false
 
 boundary:
+  enabled: false
   global_material:
     G: [9.81]
     RHO: [1000]
@@ -53,17 +57,6 @@ boundary:
     TRN: [0]
     PRE: [1]
   boundary_strings:
-    MTS:
-      - [1, 1]
-  time_series:
-    - type: XY1
-      id: 1
-      data: 'C:\data\mlc_test\red_river\ts.txt'
-    - type: XY1
-      id: 2
-      data:
-       -  [0.0, 0.0]
-       -  [1000.0, 10.0]
   nb:
     OTW: [1]
   friction:
