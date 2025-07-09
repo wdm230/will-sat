@@ -22,7 +22,6 @@ class CurviMeshBuilder:
         self.interactive = config.get("interactive", False)
         
     def _interactive_pick_corners(self, contour, mask):
-        # create a larger figure by specifying figsize (width, height) in inches
         fig, ax = plt.subplots(figsize=(10, 10))
         cmap = ListedColormap(['white', 'blue'])
         ax.imshow(mask, cmap=cmap, origin='upper')
@@ -164,7 +163,7 @@ class CurviMeshBuilder:
             contour = np.vstack([contour, contour[0]])
         logging.info(f"Contour resampled to {len(contour)} points")
 
-                # 5. Compute new corner indices on the resampled contour
+        # 5. Compute new corner indices on the resampled contour
         side_counts = [nu, nv, nu, nv]
         new_corners = [
             0,
@@ -178,7 +177,6 @@ class CurviMeshBuilder:
         beta = np.zeros(len(contour), dtype=int)
         for idx in new_corners:
             beta[idx] = 1
-        # sum(beta) == 4 by construction
 
         # Debug overlay
         plt.figure(figsize=(6,6))

@@ -1,7 +1,7 @@
 bbox: [-91.7635618, 31.1946563, -91.7035031, 31.2287368]
-output_dir: '/home/will/Desktop'
-loc_tag: 'red_river'
-project_name: "water-seg-wdm230"
+output_dir: 'output_directory_here"
+loc_tag: 'location_name_here'
+project_name: "earth_engine_project_name_here
 dilation_iterations: 10
 
 dem:
@@ -26,47 +26,9 @@ meshing:
   interactive: true
   
 hotstart:
-  enabled: true             
-  mode: constant_depth            
-  value: 5                  
-  use_initial_velocity: false
+  enabled: false             
 
 boundary:
   enabled: false
-  global_material:
-    G: [9.81]
-    RHO: [1000]
-    MU: [1e-6]
-    MUC: [1.0]
-  materials:
-    1:
-      - type: EVS
-        params: [0.005,0.005,0.0]
-      - type: ML
-        params: [4]
-      - type: SRT
-        params: [1e-4]
-  iteration:
-    NIT: [6]
-    MIT: [100]
-    NTL: [1e-5]
-  operation:
-    SW2: null
-    INC: [40]
-    BLK: [10]
-    TRN: [0]
-    PRE: [1]
-  boundary_strings:
-  nb:
-    OTW: [1]
-  friction:
-    MNG:
-      - region: 1
-        params: [0.03]
-  time_controls:
-    T0: [0]
-    TF: [1000]
-    IDT: [1]
-  output_control:
-    OC: [1]
+
 

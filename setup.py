@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-# Dependencies are managed via environment.yml using Conda; install_requires is left empty.
+
 setup(
     name="mlc_pipeline",
     version="1.0.0",
