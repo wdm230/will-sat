@@ -20,9 +20,6 @@ class CurviMeshBuilder:
         self.nj = config.get("nj", 200)
         self.boundary_tol = config.get("boundary_tol", 10)
         self.interactive = config.get("interactive", False)
-        logging.info(
-            f"CurviMeshBuilder initialized with ni={self.ni}, nj={self.nj}, interactive={self.interactive}"
-        )
         
     def _interactive_pick_corners(self, contour, mask):
         # create a larger figure by specifying figsize (width, height) in inches
