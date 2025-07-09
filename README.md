@@ -126,7 +126,7 @@ boundary:
 ## Usage
 
 ```bash
-python -m mlc_pipeline.pipeline \
+run-mlc \
   --config path/to/config.yaml \
   --log pipeline.log
 ```
