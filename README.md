@@ -1,159 +1,184 @@
-# MLC Pipeline
+## MLC Pipeline
 
-A friendly, modular command-line tool for building river meshes from Sentinel-2 imagery, DEM data, classification masks, and more. It handles:
+A modular command-line tool for generating river meshes from Sentinel-2 imagery, DEM data, classification masks, and more. It supports:
 
-* Downloading and compositing Sentinel-2 MNDWI images
-* Classification of water vs. non-water pixels
+* Sentinel-2 MNDWI composite download and stitching
+* Water/non-water classification
 * DEM retrieval and smoothing
-* Advancing-front (and optional curvilinear) meshing
-* Generating hotstart files for ADH
-* Writing out boundary-condition decks
+* Advancing-front and curvilinear meshing
+* Hotstart file generation for ADH
+* Boundary-condition deck creation
 
 ---
 
 ## Installation
 
-1. **Clone the repo**
+1. **Clone the repository**
 
    ```bash
    git clone https://github.com/your-org/mlc_pipeline.git
    cd mlc_pipeline
    ```
-
-2. **Create the conda environment**
-   (Requires [Miniconda](https://docs.conda.io/en/latest/miniconda.html))
+2. **Create and activate the conda environment**
 
    ```bash
    conda env create -f environment.yml
    conda activate mesh_maker
    ```
-
 3. **Install the package**
 
    ```bash
    pip install .
    ```
-
-4. **Authenticate Google Earth Engine**
-   The first time you run, you’ll be prompted:
+4. **Authenticate with Google Earth Engine**
 
    ```bash
    run-mlc --config config.yaml
    ```
 
-   Follow the on-screen instructions to log in.
+   Follow the prompt to log in.
 
 ---
 
 ## Configuration
 
-All options live in your `config.yaml`. Here’s a minimal example:
+All options are defined in `config.yaml`. Example:
 
 ```yaml
-bbox: [-91.76, 31.19, -91.70, 31.23]        # [min_lon, min_lat, max_lon, max_lat]
-output_dir: output/river_project            # where to save images, meshes, etc.
-loc_tag: river                              # subfolder & filename prefix
-project_name: earth_engine_project          # your GEE project ID
+bbox: [-91.76, 31.19, -91.70, 31.23]
+output_dir: output/river_project
+loc_tag: river
+project_name: earth_engine_project
 
-# How many dilation passes on the water mask before meshing
 dilation_iterations: 10
 
 dem:
-  n_subboxes: 10    # subdivisions for DEM tiling
-  sigma: 2          # Gaussian smoothing σ
+  n_subboxes: 10
+  sigma: 2
 
 sentinel:
-  n_subboxes: 10    # splits of bbox for parallel downloads
-  num_samples: 10   # how many images to sample per tile
+  n_subboxes: 10
+  num_samples: 10
 
 classification:
-  num_samples: 5000 # number of pixels to train your classifier
+  num_samples: 5000
 
 meshing:
-  # Use curvilinear meshing?
-  curvi: true        
-  # node counts in U/V directions (ni, will be the shortest sides, nj will be the longest)
-  ni: 8              
-  nj: 150            
-  size: 20.0         # target element size for advancing front meshing
+  curvi: true
+  ni: 8
+  nj: 150
+  size: 20.0
   smoothing_iterations: 10
   chaikin_alpha: 0.5
   resample_len_frac: 0.10
-  boundary_tol: 5.0  # snap points to image edges
-  interactive: true  # pick corners by clicking
+  boundary_tol: 5.0
+  interactive: true
 
 hotstart:
-  enabled: false     # set to true to produce *.hot files
-  # Optional settings (only if enabled):
+  enabled: false
   # mode: wse | constant_depth | previous
-  # value: <number>          # water surface elevation or depth
+  # value: <number>
   # previous_hot: path/to/file.hot
   # output: custom_name.hot
 
 boundary:
-  enabled: false     # set true to write out *.bc decks
-  # If you turn this on, see "Boundary Conditions" below
+  enabled: false
+  # operation:
+  #   START_TIME: [start, end]
+  #   END_TIME:   [start, end]
+  # global_material:
+  #   DENSITY: [value, flag]
+  # materials:
+  #   1:
+  #     - type: DENSITY
+  #       params: [value, flag]
+  # boundary_strings:
+  #   MTS:
+  #     - [string_id, region]
+  # time_series:
+  #   - series_type: id
+  #     input_units: id
+  #     output_units: id
+  #     points: [[t0, v0], [t1, v1], ...]
+  # iteration:
+  #   MAX_IT: [max, flag]
+  # friction:
+  #   DRAG:
+  #     - region: id
+  #       params: [value]
+  # time_controls:
+  #   TIME_STEP: [step, flag]
+  # solution_controls:
+  #   db:
+  #     SOLVER: [id, flag]
+  #   nb:
+  #     ADAPT: [id, flag]
+  # output_control:
+  #   PRINT: [interval, flag]
+  # constituents:
+  #   - type: id
+  #     name: name
+  #     params: [value, flag]
 ```
 
 ---
 
 ## Usage
 
-### Running the pipeline
-
 ```bash
 python -m mlc_pipeline.pipeline \
   --config path/to/config.yaml \
-  --log   pipeline.log
+  --log pipeline.log
 ```
-
-1. **Authenticate** with Earth Engine (only the first run).
-2. **Download & stitch** Sentinel-2 MNDWI composites.
-3. **Classify** water mask.
-4. **Fetch & smooth** DEM, align to mask.
-5. **Build** advancing-front mesh (and optional curvi mesh).
-6. **Georeference** and save to `output_dir/loc_tag/loc_tag.3dm`.
-7. **(Optional)** Generate hotstart (`.hot`) and boundary (`.bc`) files.
 
 ### Command-line options
 
-* `--config`  Path to your YAML config (default: `../config.yaml`)
-* `--log`     Path to write pipeline logs (default: `pipeline.log`)
+* `--config`: Path to YAML config (default: `config.yaml`)
+* `--log`: Path for pipeline logs (default: `pipeline.log`)
 
 ---
 
 ## Boundary Conditions
 
-If you flip `boundary.enabled: true`, the pipeline will:
+Set `boundary.enabled: true` in your config to produce a `.bc` deck. The file `loc_tag.bc` will contain, in order:
 
-1. Extract boundary loops from the final mesh
-2. Feed them plus your `boundary:` settings into `bc_maker.BCBuilder`
-3. Emit a deck file `loc_tag.bc` with cards like `OP`, `MP`, `MTS`, `EGS`, `XY1`, etc.
+```
+OP  <operation parameters>
+MP  <global and region materials>
+CN  <constituent definitions>
+MTS <boundary-string IDs>
+EGS <edge-group entries>
+XY1 <time-series definitions>
+IP  <iteration settings>
+FR  <friction entries>
+TC  <time-control decks>
+DB  <"db" solution-control decks>
+NB  <"nb" solution-control decks>
+<key>  <output-control cards>
+END
+```
 
-You can customize under `boundary:`:
+### Example `boundary` config
 
 ```yaml
 boundary:
   enabled: true
 
   operation:
-    START_TIME: [0, 3600]
-    END_TIME:   [3600, 7200]
+    START_TIME: [0.0, 3600.0]
+    END_TIME:   [3600.0, 7200.0]
 
   global_material:
-    DENSITY: [1000, 0.0]
+    DENSITY: [1000.0, 0.0]
 
   materials:
     1:
       - type: DENSITY
         params: [998.2, 0.0]
-    2:
-      - type: VISCOSITY
-        params: [1e-6]
 
   boundary_strings:
     MTS:
-      - [1, 1]     # string_id, material_region
+      - [1, 1]
 
   time_series:
     - series_type: 1
@@ -190,24 +215,23 @@ boundary:
       params: [273.15, 0.5]
 ```
 
-Once configured, re-run the pipeline and you’ll see `loc_tag.bc` in your output folder!
+Configure these sections in the `boundary:` block of `config.yaml` as shown above.
 
 ---
 
 ## Hotstart Files
 
-Hotstart files (“.hot”) capture initial water elevations for ADH. Enable with:
+Enable with `hotstart.enabled: true`. Options:
 
 ```yaml
 hotstart:
   enabled: true
-  mode: constant_depth     # options: wse, constant_depth, previous
-  value: 2.5               # water elevation/depth
+  mode: constant_depth     # wse | constant_depth | previous
+  value: 2.5
+  previous_hot: old.hot    # only for mode "previous"
   output: river_initial.hot
-  previous_hot: old.hot    # only for mode “previous”
 ```
-
-
 ---
 
+Enjoy reproducible mesh generation!
 
