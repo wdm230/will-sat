@@ -16,8 +16,8 @@ A modular command-line tool for generating river meshes from Sentinel-2 imagery,
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/your-org/mlc_pipeline.git
-   cd mlc_pipeline
+   git clone https://github.com/your-org/will-sat.git
+   cd will-sat
    ```
 2. **Create and activate the conda environment**
 
