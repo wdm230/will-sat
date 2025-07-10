@@ -233,5 +233,3 @@ hotstart:
 ```
 ---
 
-Enjoy reproducible mesh generation!
-
