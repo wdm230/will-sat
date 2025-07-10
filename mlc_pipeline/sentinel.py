@@ -5,114 +5,124 @@ from PIL import Image
 import numpy as np
 import logging
 import concurrent.futures
+import geopandas as gpd
+from mlc_pipeline.utils import auto_utm_epsg
+
+def _drop_zm(coords):
+    if isinstance(coords, (list, tuple)):
+        if coords and isinstance(coords[0], (list, tuple)):
+            return [_drop_zm(c) for c in coords]
+        return coords[:2]
+    return coords
 
 class SentinelHandler:
-    def __init__(self, bbox, config):
-        self.bbox = bbox
-        self.num_samples = config.get("num_samples", 50)
+    def __init__(self, config: dict):
+        self.cfg = config
 
-    def download_s2_sampled_image_with_scale(
-        self,
-        sub_bbox,
-        scale,
-        num_samples=50
-    ):
+        if self.cfg.get('shapefile', False):
+            # Read and reproject shapefile to WGS84
+            gdf = gpd.read_file(self.cfg['shapefile_path'])
+            logging.info(f"Loaded shapefile from {self.cfg['shapefile_path']}, initial CRS={gdf.crs}")
+            if gdf.crs is None:
+                if 'shapefile_crs' in self.cfg:
+                    gdf = gdf.set_crs(self.cfg['shapefile_crs'])
+                else:
+                    raise ValueError("Shapefile has no CRS; set 'shapefile_crs' in config")
+            gdf = gdf.to_crs(epsg=4326)
+            logging.info("Reprojected shapefile to EPSG:4326")
+
+            # If line, buffer into polygon
+            if gdf.geom_type.isin(['LineString', 'MultiLineString']).any():
+                buf = self.cfg.get('shapefile_buffer', 100)
+                minx, miny, maxx, maxy = gdf.total_bounds
+                utm_epsg = auto_utm_epsg([minx, miny, maxx, maxy])
+
+                gdf = gdf.to_crs(epsg=utm_epsg).buffer(buf).to_crs(epsg=4326)
+
+            # Union and clean coordinates
+            union = gdf.unary_union
+            geom = union.__geo_interface__
+            clean = _drop_zm(geom['coordinates'])
+            self.geojson = {'type': geom['type'], 'coordinates': clean}
+
+
+            # bounding box from shapefile
+            minx, miny, maxx, maxy = gdf.total_bounds
+            self.bbox = [minx, miny, maxx, maxy]
+
+        else:
+            self.geojson = None
+            self.bbox = config['bbox']
+            logging.info(f"Using bbox from config: {self.bbox}")
+
+    def download_s2_median_mndwi(self, scale):
         """
-        Attempts to download a Sentinel-2 composite for the given sub_bbox at the specified scale.
-        Returns a tuple (sub_bbox, img_array, used_date, scale) on success, or (None, None, None, None) on failure.
+        Download median MNDWI composite over region, masked by shapefile polygon if given.
         """
-        region = ee.Geometry.Rectangle(sub_bbox)
-        collection = (
+        logging.info(f"Starting download_s2_median_mndwi at scale={scale}")
+        # define region geometry
+        region = ee.Geometry(self.geojson) if self.geojson else ee.Geometry.Rectangle(self.bbox)
+
+
+        # filter and compose median
+        coll = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
               .filterBounds(region)
-              .filterDate('2023-01-01', '2023-12-31')
+              .filterDate('2023-01-01', '2023-01-31')
               .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
         )
-        size = collection.size().getInfo()
-        if size == 0:
-            logging.warning(f"No images for {sub_bbox} in the specified date range.")
-            return None, None, None, None
-
-        # sample as before
-        list_img = collection.toList(size)
-        # grab first image date and log it
-        first_img = ee.Image(list_img.get(0))
-        used_date = ee.Date(first_img.get('system:time_start')) \
-                         .format('YYYY-MM-dd') \
-                         .getInfo()
-        logging.info(f"Selected Sentinel-2 image date: {used_date}")
-
-        ns = num_samples if size >= num_samples else size
-        step = size / ns
-        indices = ee.List.sequence(0, size - 1, step)
-        sampled = indices.map(lambda i: ee.Image(list_img.get(ee.Number(i).round())))
-        sampled_collection = ee.ImageCollection(sampled)
-        composite = sampled_collection.mean()
-
-        bands = composite.bandNames().getInfo()
-        if 'B3' not in bands or 'B11' not in bands:
-            logging.warning(f"Required bands missing for {sub_bbox}. Bands: {bands}")
-            return None, None, None, None
-
-        mndwi = composite.normalizedDifference(['B3', 'B11']).rename('MNDWI')
-        mndwi_rgb = mndwi.visualize(min=-1, max=1, palette=['black', 'white', 'blue'])
-
-        params = {'region': region.coordinates().getInfo(), 'format': 'png', 'scale': scale}
         try:
-            url = mndwi_rgb.getThumbURL(params)
-            response = requests.get(url)
-            response.raise_for_status()
-
-            img = Image.open(BytesIO(response.content)).convert("RGB")
-            img_array = np.array(img)
-            return sub_bbox, img_array, used_date, scale
+            count = coll.size().getInfo()
         except Exception as e:
-            logging.error(f"Failed to retrieve thumbnail: {e}")
-            return None, None, None, None
+            logging.warning(f"Could not fetch collection size: {e}")
 
-    def download_subboxes(self, indexed_sub_bboxes):
-        """
-        Concurrently download composites for a list of enumerated sub_bboxes.
-        Each element in indexed_sub_bboxes should be a tuple: (index, sub_bbox).
-        This function will try each candidate scale for all sub-boxes together; if one fails at a given scale,
-        a single warning is logged and the function moves on to the next scale.
-        Returns a list of tuples: (index, sub_bbox, img_array, used_scale) if successful.
-        """
-        candidate_scales = [5, 10, 15, 20, 30, 50]
-        for scale in candidate_scales:
-            results = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                future_to_index = {
-                    executor.submit(
-                        self.download_s2_sampled_image_with_scale,
-                        sb, scale
-                    ): idx
-                    for idx, sb in indexed_sub_bboxes
-                }
-                for future in concurrent.futures.as_completed(future_to_index):
-                    idx = future_to_index[future]
-                    res = future.result()  # (sub_bbox, img_array, used_date, scale)
-                    results.append((idx, res))
-            if all(r[1][0] is not None for r in results):
-                return [
-                    (idx, sub, img, scale)
-                    for idx, (sub, img, _, scale) in sorted(results, key=lambda x: x[0])
-                ]
-            else:
-                logging.warning(f"Scale {scale} failed, moving to next size.")
-        logging.warning("Failed to sample composite for all candidate scales.")
-        return []
+        # compute MNDWI per image then take median
+        mndwi_coll = coll.map(
+            lambda img: img.normalizedDifference(['B3','B11']).rename('MNDWI')
+        )
+        mndwi_median = mndwi_coll.median().clip(region)
+        logging.info("Computed median MNDWI composite and clipped to region")
 
-    def save_composite(self, composite_img, output_path):
-        from pathlib import Path
-        import matplotlib.pyplot as plt
-        op = Path(output_path)
-        op.parent.mkdir(parents=True, exist_ok=True)
-        plt.imsave(str(op), composite_img)
-        logging.info(f"Saved composite image to {op}")
-        from pathlib import Path
-        import matplotlib.pyplot as plt
-        op = Path(output_path)
-        op.parent.mkdir(parents=True, exist_ok=True)
-        plt.imsave(str(op), composite_img)
-        logging.info(f"Saved composite image to {op}")
+        # mask outside polygon (if provided)
+        if self.geojson:
+            poly = ee.Geometry(self.geojson)
+            mask = ee.Image.constant(1).clip(poly)
+            mndwi_median = mndwi_median.updateMask(mask)
+
+        # visualize and fill masked with black
+        viz = (
+            mndwi_median
+              .visualize(min=-1, max=1, palette=['black','white','blue'])
+              .unmask(0)
+        )
+
+
+        url = viz.getThumbURL({
+            'region': region.coordinates().getInfo(),
+            'format': 'png',
+            'scale': scale
+        })
+
+        try:
+            resp = requests.get(url)
+            resp.raise_for_status()
+            img = Image.open(BytesIO(resp.content)).convert("RGB")
+            arr = np.array(img)
+            date = ee.Date(coll.first().get('system:time_start')).format('YYYY-MM-dd').getInfo()
+            logging.info(f"First scene date: {date}")
+            return arr, date
+        except Exception as e:
+            logging.error(f"Thumbnail download failed: {e}")
+            return None, None
+
+    def download_subboxes(self, indexed):
+        """
+        Single-region median download (ignores subboxes).
+        """
+        scale = self.cfg.get('sentinel', {}).get('scale', 20)
+        logging.info(f"download_subboxes called with indexed={indexed}, scale={scale}")
+        img, date = self.download_s2_median_mndwi(scale)
+        if img is None:
+            logging.error("No image returned from download_s2_median_mndwi")
+            return []
+        return [(0, self.bbox, img, date, scale)]

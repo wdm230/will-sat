@@ -11,9 +11,11 @@ import logging
 class Classifier:
     def __init__(self, config):
         self.num_samples = config.get("num_samples", 5000)
+        self.dilation_iterations = config.get("dilation_iterations")
+        self.erosion_iterations = config.get("erosion_iterations")
 
     def classify(self, merged_image, output_dir=None):
-        # Convert the image to a NumPy array if it isn't already.
+
         merged_image = np.array(merged_image)
     
         logging.info("Performing Maximum Likelihood Classification (MLC)...")
@@ -50,9 +52,9 @@ class Classifier:
         predictions = clf.predict(X_all).reshape(H_img, W_img)
         mlc_mask = (predictions.astype(np.uint8)) * 255
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        dilated_mask = cv2.dilate(mlc_mask, kernel, iterations=8)
-        morphed_mask = cv2.erode(dilated_mask, kernel, iterations=8)
-        morphed_mask = cv2.dilate(morphed_mask, kernel, iterations=1)
+        dilated_mask = cv2.dilate(mlc_mask, kernel, iterations=self.dilation_iterations)
+        morphed_mask = cv2.erode(dilated_mask, kernel, iterations=self.erosion_iterations)
+        # morphed_mask = cv2.dilate(morphed_mask, kernel, iterations=1)
     
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)

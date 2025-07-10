@@ -1,9 +1,14 @@
-bbox: [-91.7635618, 31.1946563, -91.7035031, 31.2287368]
-output_dir: 'output_directory_here"
-loc_tag: 'location_name_here'
-project_name: "earth_engine_project_name_here
-dilation_iterations: 10
+bbox: [32.5756, 25.165, 32.7176, 25.24597]
+output_dir: '/home/will/Desktop/'
+loc_tag: 'nile_shp'
+project_name: "water-seg-wdm230"
 
+
+shapefile: true
+shapefile_path: "/home/will/mesh_maker/nile.shp"
+
+exclusion:
+  enabled: false
 dem:
   n_subboxes: 10
   sigma: 2
@@ -13,16 +18,18 @@ sentinel:
 
 classification:
   num_samples: 5000
-
+  dilation_iterations: 3
+  erosion_iterations: 1
+  
 meshing:
   curvi: true
-  ni: 8
-  nj: 150
+  ni: 100
+  nj: 500
   size: 20.0
   smoothing_iterations: 10
   chaikin_alpha:       0.5    
   resample_len_frac:   0.10   
-  boundary_tol: 5.0
+  boundary_tol: 7.0
   interactive: true
   
 hotstart:
