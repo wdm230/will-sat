@@ -1,11 +1,11 @@
-bbox: [32.5756, 25.165, 32.7176, 25.24597]
-output_dir: '/home/will/Desktop/'
-loc_tag: 'nile_shp'
-project_name: "water-seg-wdm230"
+bbox: [min_lat, min_long, max_lat, max_long]
+output_dir: 'output_dir'
+loc_tag: 'location_name_here'
+project_name: "project_id_here"
 
 
-shapefile: true
-shapefile_path: "/home/will/mesh_maker/nile.shp"
+shapefile: false
+shapefile_path: "shapefile_here.shp"
 
 exclusion:
   enabled: false
@@ -20,20 +20,27 @@ classification:
   num_samples: 5000
   dilation_iterations: 3
   erosion_iterations: 1
-  
+
 meshing:
   curvi: true
-  ni: 100
-  nj: 500
+  ni: 49
+  nj: 499
   size: 20.0
   smoothing_iterations: 10
-  chaikin_alpha:       0.5    
-  resample_len_frac:   0.10   
+  chaikin_alpha:       0.5
+  resample_len_frac:   0.10
   boundary_tol: 7.0
   interactive: true
-  
+
+bathymetry:
+  shape: parabola
+  bottom_height: 1.0
+  top_height: 1.75
+  slope: 0.5
+  orientation: auto
+
 hotstart:
-  enabled: false             
+  enabled: false
 
 boundary:
   enabled: false

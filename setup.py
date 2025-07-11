@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 
 setup(
-    name="mlc_pipeline",
+    name="will-sat",
     version="1.0.0",
     description="A modular processing pipeline for Sentinel-2 composites, DEM retrieval, classification, and meshing.",
     author="Will McKelvey",

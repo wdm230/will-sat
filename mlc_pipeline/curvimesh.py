@@ -181,6 +181,7 @@ class CurviMeshBuilder:
         # 7. Build mesh
         X = grid.x + centroid[0]
         Y = grid.y + centroid[1]
+        self.eta, self.nu = X.shape
         # ensure Z is an array matching X/Y
         if np.isscalar(avg_z):
             Z = np.full_like(X, avg_z)

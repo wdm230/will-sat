@@ -17,7 +17,7 @@ from mlc_pipeline.curvimesh import CurviMeshBuilder
 from mlc_pipeline.hotstart import HotstartBuilder
 from mlc_pipeline.bc_maker import BCBuilder
 from mlc_pipeline.metadata import MeshMetadata
-
+from mlc_pipeline.bathymetry import Bathymetry
 class MLCPipeline:
     def __init__(self, config, config_path):
         self.config = config
@@ -138,9 +138,27 @@ class MLCPipeline:
         # --- Mesh building ---
         adv_mesh, face_mats = self.mesh_builder.build_adv_front_mesh(mlc_mask, modified_dem)
         if self.curvi_enabled:
+            # Build curvi mesh and capture logical dims
             mesh, face_mats = self.curvi_builder.build(adv_mesh, avg_level, mlc_mask)
+            eta, nu = self.curvi_builder.eta, self.curvi_builder.nu
+
+            # Generate custom bathymetry surface
+            bt_cfg = self.config.get('bathymetry', {})
+            bt = Bathymetry(bt_cfg)
+            Z = bt.generate(eta, nu)
+
+            # Apply Z directly to mesh vertices without rebuilding
+            verts = mesh.vertices.copy()
+            if Z.size == verts.shape[0]:
+                verts[:, 2] = Z.ravel()
+            else:
+                # if mesh vertices > grid nodes, assume ordering matches and trim/pad
+                verts[:, 2] = np.resize(Z.ravel(), verts[:, 2].shape)
+            mesh.vertices = verts
         else:
             mesh, face_mats = adv_mesh, face_mats
+            eta, nu = mlc_mask.shape
+
 
         # Georeference and save mesh
         geo_mesh = (
