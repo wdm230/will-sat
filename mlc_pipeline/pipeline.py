@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 import shutil
+from pyproj import Transformer
+
 
 from mlc_pipeline.utils import auto_utm_epsg, setup_logger, split_bbox
 from mlc_pipeline.exclusion import ExclusionEditor
@@ -75,7 +77,6 @@ class MLCPipeline:
         for idx, bb, arr, _, _ in sampled:
             raw_mask = self.classifier.classify(arr, output_dir=str(self.subdir))
             bin_mask = (raw_mask > 0).astype(np.uint8)
-            plt.imsave(str(self.subdir / f"mask_tile_{idx}.png"), bin_mask, cmap='gray')
             tile_masks.append(bin_mask)
             tile_bboxes.append(bb)
 
@@ -140,12 +141,12 @@ class MLCPipeline:
         if self.curvi_enabled:
             # Build curvi mesh and capture logical dims
             mesh, face_mats = self.curvi_builder.build(adv_mesh, avg_level, mlc_mask)
-            eta, nu = self.curvi_builder.eta, self.curvi_builder.nu
-
+            eta, nu = self.curvi_builder.eta, self.curvi_builder.nv
+            shape_axis = self.curvi_builder.shape_axis
             # Generate custom bathymetry surface
             bt_cfg = self.config.get('bathymetry', {})
             bt = Bathymetry(bt_cfg)
-            Z = bt.generate(eta, nu)
+            Z = bt.generate(eta, nu, avg_level)
 
             # Apply Z directly to mesh vertices without rebuilding
             verts = mesh.vertices.copy()
@@ -168,7 +169,7 @@ class MLCPipeline:
         )
         mesh_path = self.subdir / f"{self.loc_tag}.3dm"
         self.mesh_builder.save_mesh(geo_mesh, face_mats, str(mesh_path))
-        logging.info(f"Saved mesh to {mesh_path}")
+
 
         # --- Save mesh plot ---
         verts = np.array([v for v in geo_mesh.vertices])
@@ -178,13 +179,72 @@ class MLCPipeline:
             poly = verts[f]
             xs = np.append(poly[:,0], poly[0,0])
             ys = np.append(poly[:,1], poly[0,1])
-            ax.plot(xs, ys, linewidth=0.15, color='black')
+            ax.plot(xs, ys, linewidth=0.1, color='black')
         ax.set_aspect('equal')
-        ax.axis('off')
+        ax.axis('on')
         plot_path = self.subdir / f"{self.loc_tag}_mesh.png"
         fig.savefig(str(plot_path), dpi=500, bbox_inches='tight')
         plt.close(fig)
         logging.info(f"Saved mesh plot to {plot_path}")
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        X = verts[:,0].reshape((eta, nu))
+        Y = verts[:,1].reshape((eta, nu))
+        cs = ax.contourf(X, Y, Z, levels=30, cmap='viridis', alpha=0.8)
+
+
+        ax.set_aspect('equal')
+        ax.axis('on')
+        cbar = fig.colorbar(cs, ax=ax, shrink=0.6, pad=0.02)
+        cbar.set_label("Depth / Elevation", rotation=270, labelpad=15)
+
+        contour_path = self.subdir / f"{self.loc_tag}_bathymetry.png"
+        fig.savefig(str(contour_path), dpi=500, bbox_inches='tight')
+        plt.close(fig)
+        logging.info(f"Saved bathymetry contour to {contour_path}")
+
+        minx, miny, maxx, maxy = self.bbox
+        true_rgb = self.sentinel_handler.download_s2_true_color(
+            scale=used_scale,
+            bbox=self.bbox,
+            target_epsg=self.target_epsg,
+            width=mask_w,
+            height=mask_h
+        )
+        transformer = Transformer.from_crs("epsg:4326", self.target_epsg, always_xy=True)
+        minx_t, miny_t = transformer.transform(minx, miny)
+        maxx_t, maxy_t = transformer.transform(maxx, maxy)
+
+
+        extent = (minx_t, maxx_t, miny_t, maxy_t)
+
+        fig, ax = plt.subplots(figsize=(8,6))
+
+
+        ax.imshow(
+            true_rgb,
+            origin='upper',    
+            extent=extent,
+            interpolation='nearest',
+            zorder=0
+        )
+
+        cf = ax.contourf(
+            X, Y, Z,
+            levels=100,
+            cmap='jet',
+            alpha=1.0,
+            zorder=1
+        )
+
+        ax.set_aspect('equal')
+        ax.axis('on')
+
+        fig.colorbar(cf, ax=ax, shrink=0.6, pad=0.02)
+        fig.savefig(str(self.subdir/f"{self.loc_tag}_overlay_proj.png"), dpi=500,
+                    bbox_inches='tight', pad_inches=0.1)
+        plt.close(fig)
+
 
         # --- Metadata ---
         meta = MeshMetadata(

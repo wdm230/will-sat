@@ -3,114 +3,82 @@ import logging
 
 class Bathymetry:
     """
-    Generate logical-grid bathymetry patterns based on matrix indices.
+    Generate logical‐grid bathymetry: profile always down the rows
+    (top→bottom), then extruded left→right across the columns.
 
-    Config parameters (pass via dict or kwargs):
-      shape: one of 'bathtub', 'parabola', 'v', 'gaussian', 'sine'
-      bottom_height: depth of basin interior (h)
-      top_height:    elevation of rim or ends (H)
-      slope:         optional slope fraction for trapezoidal walls
-      amplitude:     amplitude for sine tube
-      sigma:         standard deviation for gaussian hill
-      orientation:   'auto', 'short', 'long', 'rows', or 'cols'
+    Config params:
+      shape: one of 'bathtub', 'parabola', 'v', 'average'
+      bottom_height (h), top_height (H), slope, amplitude, sigma
     """
     def __init__(self, config: dict):
-        self.shape = config.get('shape', 'bathtub')
-        self.h = config.get('bottom_height', 0.0)
-        self.H = config.get('top_height', 1.0)
-        self.slope = config.get('slope', None)
-        self.amplitude = config.get('amplitude', 1.0)
-        self.sigma = config.get('sigma', 0.5)
-        self.orientation = config.get('orientation', 'auto')
+        self.shape     = config.get('shape', 'bathtub')
+        self.h         = config.get('bottom_height', 0.0)
+        self.H         = config.get('top_height',    1.0)
+        self.slope     = config.get('slope',         None)
+        self.amplitude = config.get('amplitude',     1.0)
+        self.sigma     = config.get('sigma',         0.5)
 
-    def generate(self, eta: int, nu: int) -> np.ndarray:
+    def generate(self,
+                 n_rows: int,
+                 n_cols: int,
+                 avg_z=None
+                ) -> np.ndarray:
         """
-        Return a (eta x nu) array of heights, applying shape along specified axis.
+        n_rows × n_cols grid.  Build a 1-D profile along the rows
+        (length n_rows), then tile it across n_cols.
         """
-        logging.info(f"Bathymetry.generate called with eta={eta}, nu={nu}, shape='{self.shape}', bottom_height={self.h}, top_height={self.H}, orientation='{self.orientation}'")
-        Z = np.full((eta, nu), self.h, dtype=float)
+        logging.info(
+            f"Bathymetry.generate: shape={self.shape!r}, "
+            f"h={self.h}, H={self.H}, grid=({n_rows}×{n_cols})"
+        )
 
-        rows = np.linspace(0, 1, eta)
-        cols = np.linspace(0, 1, nu)
-        logging.info(f"rows[0:3]={rows[:3]}, cols[0:3]={cols[:3]}")
+        # 1) coordinate vector along rows
+        rows = np.linspace(0.0, 1.0, n_rows)
 
-        # Determine shape axis
-        if self.orientation in ('auto', 'short'):
-            shape_axis = 0 if eta <= nu else 1
-        elif self.orientation == 'long':
-            shape_axis = 1 if eta <= nu else 0
-        elif self.orientation == 'rows':
-            shape_axis = 0
-        elif self.orientation == 'cols':
-            shape_axis = 1
-        else:
-            raise ValueError(f"Invalid orientation '{self.orientation}'")
-        extrude_axis = 1 - shape_axis
-        logging.info(f"shape_axis={shape_axis} ('0'=rows, '1'=cols), extrude_axis={extrude_axis}")
+        length = n_rows
+        A      = self.H - self.h
+        profile = np.full(length, self.h, dtype=float)
 
-        # build shape and extrude coordinates
-        if shape_axis == 0:
-            u = rows[:, None]
-            v = cols[None, :]
-            logging.info("Variation down rows (shape_axis=0)")
-        else:
-            u = cols[None, :]
-            v = rows[:, None]
-            logging.info("Variation across cols (shape_axis=1)")
-
-        logging.info(f"Entering shape branch: {self.shape}")
+        # 2) build the 1-D profile down the rows
         if self.shape == 'bathtub':
-            # Determine length of the shape‐axis
-            length = eta if shape_axis == 0 else nu
-
-            # Start with a flat bottom profile
-            profile = np.full(length, self.h, dtype=float)
-
             if self.slope is None:
-                # just vertical walls at the ends
-                profile[0] = self.H
-                profile[-1] = self.H
+                profile[  0 ] = self.H
+                profile[ -1 ] = self.H
             else:
-                # sloped walls of width w at each end
-                w = max(1, int(length * self.slope))
+                w    = max(1, int(length * self.slope))
                 ramp = np.linspace(self.H, self.h, w)
-                profile[:w] = ramp
+                profile[:w]  = ramp
                 profile[-w:] = ramp[::-1]
 
-            # extrude that 1-D profile across the other axis
-            if shape_axis == 0:
-                Z = np.tile(profile[:, None], (1, nu))
-            else:
-                Z = np.tile(profile[None, :], (eta, 1))
-
         elif self.shape == 'parabola':
-            logging.info("Bathymetry: parabola profile")
-            A = self.H - self.h
-            U = 2*u - 1
-            Z_vals = self.h + A*(U**2)
-            logging.info(f"Parabola Z_vals sample[0:3]={Z_vals.ravel()[:3]}")
-            # tile along extrude axis
-            if shape_axis == 0:
-                Z = np.tile(Z_vals, (1, nu))
-            else:
-                Z = np.tile(Z_vals, (eta, 1))
-            logging.info(f"After tile: center={Z[eta//2, nu//2]}")
+            U = 2*rows - 1
+            profile = self.h + A * (U**2)
 
         elif self.shape == 'v':
-            logging.info("Bathymetry: V-shape")
-            n = eta if shape_axis == 0 else nu
-            mid = (n - 1) / 2
-            idx = np.arange(n)
+            idx = np.arange(length)
+            mid = (length - 1) / 2
             norm = np.abs(idx - mid) / mid
-            arr = self.h + (self.H - self.h) * norm
-            logging.info(f"V-shape arr sample[0:3]={arr[:3]}")
-            if shape_axis == 0:
-                Z = np.tile(arr[:, None], (1, nu))
+            profile = self.h + A * norm
+
+        elif self.shape == 'average':
+            if avg_z is None:
+                raise ValueError("Must pass avg_z when shape='average'")
+            if np.isscalar(avg_z):
+                profile = np.full(length, avg_z, dtype=float)
             else:
-                Z = np.tile(arr[None, :], (eta, 1))
+                arr = np.asarray(avg_z, dtype=float)
+                if arr.shape[0] != length:
+                    raise ValueError(
+                        f"avg_z length {arr.shape[0]} != expected {length}"
+                    )
+                profile = arr
 
         else:
-            raise ValueError(f"Unknown bathymetry shape: {self.shape}")
+            raise ValueError(f"Unknown shape: {self.shape!r}")
 
-        logging.info(f"Bathymetry generated: Z.min()={Z.min()}, Z.max()={Z.max()}, center={Z[eta//2, nu//2]}")
+        # 3) extrude that 1-D profile across the columns:
+        #    profile.reshape((n_rows,1)) tiled (1, n_cols) → (n_rows, n_cols)
+        Z = np.tile(profile.reshape((length, 1)), (1, n_cols))
+
+        logging.info(f"Bathymetry Z.min()={Z.min()}, Z.max()={Z.max()}")
         return Z

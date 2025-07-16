@@ -56,11 +56,6 @@ class Classifier:
         morphed_mask = cv2.erode(dilated_mask, kernel, iterations=self.erosion_iterations)
         # morphed_mask = cv2.dilate(morphed_mask, kernel, iterations=1)
     
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            mlc_result_path = os.path.join(output_dir, "mlc_result.png")
-            plt.imsave(mlc_result_path, morphed_mask, cmap="coolwarm")
-            logging.info(f"Saved MLC result image to {mlc_result_path}")
     
         # Extract main water regions using connectivity and skeletonization.
         water_bool = morphed_mask > 0

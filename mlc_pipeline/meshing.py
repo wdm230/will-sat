@@ -33,19 +33,39 @@ class MeshBuilder:
         return out
 
     def resample_contour(self, contour, target_spacing):
-        if not np.allclose(contour[0], contour[-1]):
-            contour = np.vstack([contour, contour[0]])
-        deltas = np.diff(contour, axis=0)
-        seg_lengths = np.hypot(deltas[:, 0], deltas[:, 1])
-        cumlen = np.concatenate(([0], np.cumsum(seg_lengths)))
-        total_len = cumlen[-1]
-        distances = np.arange(0, total_len, target_spacing)
-        xs = np.interp(distances, cumlen, contour[:, 0])
-        ys = np.interp(distances, cumlen, contour[:, 1])
-        resamp = np.vstack([xs, ys]).T
-        if not np.allclose(resamp[0], resamp[-1]):
-            resamp = np.vstack([resamp, resamp[0]])
-        return resamp
+        # 1) compute segment lengths
+        deltas   = np.diff(contour, axis=0)
+        seg_lens = np.hypot(deltas[:,0], deltas[:,1])
+
+        # 2) build cumulative-length array
+        cum = np.concatenate(([0.0], np.cumsum(seg_lens)))
+        total_len = cum[-1]
+
+        # 3) determine sample positions
+        samples = np.arange(0, total_len, target_spacing)
+
+        if len(samples) == 0:
+            return contour.copy()
+
+        # 4) interpolate points at each sample distance
+        resamp = []
+        for s in samples:
+            idx = np.searchsorted(cum, s)
+            if idx == 0:
+                resamp.append(contour[0])
+            else:
+                t0, t1 = cum[idx-1], cum[idx]
+                p0, p1 = contour[idx-1], contour[idx]
+                frac = (s - t0) / (t1 - t0) if t1 > t0 else 0.0
+                resamp.append(p0 + frac * (p1 - p0))
+
+        # 5) ensure closed loop
+        if resamp and not np.allclose(resamp[0], resamp[-1]):
+            resamp.append(resamp[0])
+
+        return np.vstack(resamp)
+
+
 
     def chaikin_smoothing(self, contour, iterations=1):
         alpha = self.chaikin_alpha
@@ -112,7 +132,7 @@ class MeshBuilder:
             c = hierarchy[idx][2]
             while c != -1:
                 yield c; c = hierarchy[c][0]
-            # after you've defined `children` and before building the Polygon…
+
 
         hole_loops = []
         for cid in children(outer):
@@ -120,7 +140,7 @@ class MeshBuilder:
             if not np.allclose(loop[0], loop[-1]):
                 loop = np.vstack([loop, loop[0]])
     
-            # — apply the same smoothing pipeline to the interior loop —
+
             if self.smoothing_iterations > 0:
                 loop = self.chaikin_smoothing(loop,
                                               iterations=self.smoothing_iterations)

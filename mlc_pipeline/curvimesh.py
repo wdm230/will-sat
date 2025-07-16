@@ -75,26 +75,50 @@ class CurviMeshBuilder:
         return ordered
 
     def _compute_side_counts(self, contour, corners):
-        # cumulative arc-length
-        deltas = np.diff(contour, axis=0)
-        seg_lens = np.hypot(deltas[:,0], deltas[:,1])
-        cumlen = np.concatenate(([0.0], np.cumsum(seg_lens)))
-        # measure each side
+        """
+        Compute true side lengths, pick the two longest opposite sides,
+        then assign those to columns (nj) and the others to rows (ni).
+        Returns side_counts, nu (#rows), nv (#cols).
+        """
+        # 1) Compute true arc‐lengths along the contour
+        deltas   = np.diff(contour, axis=0)
+        seg_lens = np.hypot(deltas[:, 0], deltas[:, 1])
+        cumlen   = np.concatenate(([0.0], np.cumsum(seg_lens)))
+
+        # 2) Measure each of the 4 sides
         lengths = []
         for i in range(4):
-            i0, i1 = corners[i], corners[(i+1)%4]
+            i0, i1 = corners[i], corners[(i + 1) % 4]
             if i1 >= i0:
-                length = cumlen[i1] - cumlen[i0]
+                lengths.append(cumlen[i1] - cumlen[i0])
             else:
-                length = (cumlen[-1] - cumlen[i0]) + cumlen[i1]
-            lengths.append(length)
-        # assign counts: two longest -> nj, two shortest -> ni
-        idx_sorted = np.argsort(lengths)
-        long_idxs = idx_sorted[2:]
-        side_counts = [(self.nj if i in long_idxs else self.ni) for i in range(4)]
-        logging.info(f"Side lengths: {lengths}")
-        logging.info(f"Side counts by idx: {side_counts}")
-        return side_counts
+                lengths.append((cumlen[-1] - cumlen[i0]) + cumlen[i1])
+
+        # 3) Pick the single longest side and its opposite
+        longest   = int(np.argmax(lengths))
+        opposite  = (longest + 2) % 4
+        long_idxs = {longest, opposite}
+
+        # 4) Build side_counts: long sides → nj, short → ni
+        side_counts = [
+            (self.nj if idx in long_idxs else self.ni)
+            for idx in range(4)
+        ]
+
+        # 5) Force columns to be the long axis:
+        #    nu = #rows = ni, nv = #cols = nj
+        nu, nv = self.ni, self.nj
+
+        # 6) (optional) record for Bathymetry if you use it
+        self.shape_axis = 1
+
+        logging.debug(f"side lengths:  {lengths}")
+        logging.debug(f"long sides idxs: {long_idxs}")
+        logging.debug(f"side_counts:   {side_counts}")
+        logging.debug(f"Gridgen shape: nu(rows)={nu}, nv(cols)={nv}")
+
+        return side_counts, nu, nv
+
 
     def build(self, adv_mesh, avg_z, mask):
         # 1. Extract boundary contour
@@ -108,7 +132,8 @@ class CurviMeshBuilder:
         if not np.allclose(ext[0], ext[-1]):
             ext = np.vstack([ext, ext[0]])
         contour = ext
-        # 2. Smooth & clamp to boundary
+
+        # 2. Smooth & clamp to image edges
         contour = self.mbuilder.chaikin_smoothing(contour, iterations=self.mbuilder.smoothing_iterations)
         contour[-1] = contour[0]
         h, w = mask.shape
@@ -123,24 +148,28 @@ class CurviMeshBuilder:
             y = 0.0 if y <= tol else (h-1 if y >= h-1-tol else y)
             contour[i] = [x,y]
         contour[-1] = contour[0]
+
         # 3. Pick & order corners
         if self.interactive:
             corners = self._interactive_pick_corners(contour, mask)
         else:
             deltas = np.diff(contour, axis=0)
             cumlen = np.concatenate(([0.0], np.cumsum(np.hypot(deltas[:,0], deltas[:,1]))))
-            total = cumlen[-1]
+            total  = cumlen[-1]
             targets = [0.0, total*0.25, total*0.5, total*0.75]
             corners = [int(np.argmin(np.abs(cumlen - t))) for t in targets]
             logging.info(f"Auto-picked corners: {corners}")
         corners = self._order_corners_clockwise(contour, corners)
-        # 4. Compute side counts and resample
-        side_counts = self._compute_side_counts(contour, corners)
+
+        # 4. Compute side_counts + nu/nv
+        side_counts, nu, nv = self._compute_side_counts(contour, corners)
+
+        # 5. Resample each side to side_counts[i] points
         resamp = []
         for i, count in enumerate(side_counts):
             i0, i1 = corners[i], corners[(i+1)%4]
-            seg = contour[i0:i1+1] if i1>=i0 else np.vstack([contour[i0:], contour[:i1+1]])
-            ds = np.hypot(*(np.diff(seg, axis=0).T))
+            seg = contour[i0:i1+1] if i1 >= i0 else np.vstack([contour[i0:], contour[:i1+1]])
+            ds  = np.hypot(*(np.diff(seg, axis=0).T))
             cum = np.concatenate(([0.0], np.cumsum(ds)))
             samples = np.linspace(0, cum[-1], count+1)[:-1]
             pts = []
@@ -151,24 +180,25 @@ class CurviMeshBuilder:
                 else:
                     t0, t1 = cum[idx-1], cum[idx]
                     p0, p1 = seg[idx-1], seg[idx]
-                    frac = (s-t0)/(t1-t0) if t1>t0 else 0.0
+                    frac = (s-t0)/(t1-t0) if t1 > t0 else 0.0
                     pts.append(p0 + frac*(p1-p0))
             resamp.append(np.array(pts))
         contour = np.vstack(resamp)
         if not np.allclose(contour[0], contour[-1]):
             contour = np.vstack([contour, contour[0]])
-        # 5. New corner indices & beta
+
+        # 6. New corner indices & beta
         cum_counts = np.cumsum(side_counts)
         new_corners = [0, cum_counts[0], cum_counts[1], cum_counts[2]]
         beta = np.zeros(len(contour), dtype=int)
         for idx in new_corners:
             beta[idx] = 1
-        # 6. Gridgen
-        nv, nu = side_counts[0], side_counts[1]
+
+        # 7. Build the grid with the correct (nu,nv)
         shape = (nu, nv)
         ul_corner = corners[0]
-        centroid = contour.mean(axis=0)
-        pts = contour - centroid
+        centroid  = contour.mean(axis=0)
+        pts       = contour - centroid
         grid = pygridgen.Gridgen(
             pts[:,0], pts[:,1], beta,
             shape=shape,
@@ -178,17 +208,22 @@ class CurviMeshBuilder:
             checksimplepoly=False,
             verbose=True
         )
-        # 7. Build mesh
+
+        # 8. Extract coordinates & store subdivisions
         X = grid.x + centroid[0]
         Y = grid.y + centroid[1]
-        self.eta, self.nu = X.shape
-        # ensure Z is an array matching X/Y
+        ny, nx = X.shape
+        self.eta = ny
+        self.nu  = nu
+        self.nv  = nv
+
+        # 9. Build triangle mesh
         if np.isscalar(avg_z):
             Z = np.full_like(X, avg_z)
         else:
             Z = avg_z
         verts = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
-        ny, nx = X.shape
+
         faces = []
         for i in range(ny-1):
             for j in range(nx-1):

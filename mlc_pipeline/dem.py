@@ -64,10 +64,6 @@ class DEMHandler:
         return tile
 
     def get_dem(self, scale):
-        """
-        If shapefile is used, download exactly one DEM tile over its bbox.
-        Otherwise split bbox into subboxes as before.
-        """
         if self.geojson:
             # single download over full bbox
             return self.fetch_dem_tile_ee(self.bbox, scale)
