@@ -8,7 +8,6 @@ import numpy as np
 import shutil
 from pyproj import Transformer
 
-
 from mlc_pipeline.utils import auto_utm_epsg, setup_logger, split_bbox
 from mlc_pipeline.exclusion import ExclusionEditor
 from mlc_pipeline.dem import DEMHandler
@@ -20,6 +19,7 @@ from mlc_pipeline.hotstart import HotstartBuilder
 from mlc_pipeline.bc_maker import BCBuilder
 from mlc_pipeline.metadata import MeshMetadata
 from mlc_pipeline.bathymetry import Bathymetry
+
 class MLCPipeline:
     def __init__(self, config, config_path):
         self.config = config
@@ -50,7 +50,7 @@ class MLCPipeline:
         self.mesh_builder = MeshBuilder(self.config.get("meshing", {}))
         self.curvi_builder = CurviMeshBuilder(self.mesh_builder, self.config.get("meshing", {}))
         self.hotstart_builder = HotstartBuilder(self.config.get("hotstart", {}))
-        self.bc_builder = BCBuilder(self.config.get("boundary", {}))
+        self.bc_builder = BCBuilder(self.config, curvi_builder=self.curvi_builder)
 
     def run(self):
         # Authenticate and init EE
@@ -261,7 +261,7 @@ class MLCPipeline:
             logging.info(f"Hotstart file generated: {hot_path}")
         if self.config.get("boundary", {}).get("enabled", False):
             bc_path = self.subdir / f"{self.loc_tag}.bc"
-            self.bc_builder.build(geo_mesh, bc_path)
+            self.bc_builder.build(mesh, bc_path)
             logging.info(f"Boundary conditions written to {bc_path}")
 
 

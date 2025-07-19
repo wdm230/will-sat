@@ -1,187 +1,293 @@
-import yaml
-from pathlib import Path
 import logging
 import numpy as np
+import matplotlib.pyplot as plt
+import re
+from pathlib import Path
+
+class ConfigError(Exception):
+    """Exception raised for invalid BCBuilder configuration."""
+    pass
+
+# Allowed and required card types per section
+ALLOWED_CARDS = {
+    "operation": {"SW2", "TRN", "INC", "PRE", "BLK", "BT", "BTS", "TEM", "TPG", "NF2", "WND", "WAV", "DAM"},
+    "iteration": {"NIT", "MIT", "NTL", "ITL"},
+    "global_material": {"MU", "G", "RHO", "MUC"},
+    "materials": {"ML", "SRT", "TRT", "EVS", "EEV", "DF"},
+    "time_series": {"XY1", "XY2", "XYC"},
+    "solution_controls": {"db", "nb"},
+    "friction": {"MNG", "MNC", "ERH", "SAV", "URV", "EDO", "ICE", "DUN", "SRF", "SDK", "BRD"},
+    "constituents": {"SAL", "TMP", "VOR", "CON"},
+    "time_controls": {"T0", "TF", "IDT", "ATF", "STD"},
+    "output_control": {"OC", "OS", "FLX", "PRN", "PC", "ADP", "ELM", "LVL", "MEO"},
+    "boundary": {"enabled", "interactive", "edge_string_names", "header"},
+}
+
+REQUIRED_CARDS = {
+    "operation": {"SW2", "TRN"},
+    "time_controls": {"T0", "TF"},
+}
 
 class BCBuilder:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, curvi_builder=None):
+        """
+        cfg: configuration dict, with BC settings nested under 'boundary'
+        curvi_builder: CurviMeshBuilder instance providing eta, nv
+        """
         self.cfg = cfg or {}
+        self.bc_cfg = self.cfg.get('boundary', self.cfg)
+        self.curvi = curvi_builder
+        self.string_id_counter = 0
+        self.string_map = {}
+        self._validate_config()
 
-    def build(self, bc_path: str, boundary_loops: list) -> Path:
+    def _validate_config(self):
+        bc = self.bc_cfg
+        # Required cards validation
+        for section, required in REQUIRED_CARDS.items():
+            items = bc.get(section, {})
+            if isinstance(items, dict):
+                missing = required - set(items.keys())
+                if missing:
+                    logging.warning(f"Missing required cards in '{section}': {missing}")
+        # Boundary setup validation
+        if bc.get('enabled', False):
+            if not bc.get('interactive', False):
+                raise ConfigError("boundary.interactive must be true when boundary.enabled is true")
+            ens = bc.get('edge_string_names', [])
+            if not isinstance(ens, list) or len(ens) != 2:
+                raise ConfigError("boundary.edge_string_names must be a list of two names")
+            if not self.curvi:
+                raise ConfigError("curvi_builder must be provided when boundary.enabled is true")
+
+    def _next_string_id(self):
+        """Auto-increment string ID."""
+        self.string_id_counter += 1
+        return self.string_id_counter
+
+    def _write(self, f, text=""):
+        f.write(text + "\n")
+
+    def build(self, mesh, bc_path: str) -> Path:
+        """
+        Generate the .bc file at bc_path.
+        mesh: the mesh object (provides vertices) if boundary.enabled.
+        """
+        bc = self.bc_cfg
         out = Path(bc_path)
         with out.open('w') as f:
+            # Optional header
+            header = bc.get('header')
+            if header:
+                self._write(f, header)
+
+            # Core sections
             self._write_operation(f)
+            self._write_iteration(f)
+            self._write_constituents(f)
             self._write_global_material(f)
             self._write_materials(f)
-            self._write_string_structures(f, boundary_loops)
+
+            # Boundary strings
+            if bc.get('enabled', False):
+                self._write_boundary_strings(f, mesh)
+
+            # Remaining BC sections
             self._write_time_series(f)
-            self._write_iteration(f)
-            self._write_friction(f)
-            self._write_constituents(f)
-            self._write_time_controls(f)
-            self._write_solution_controls(f)
             self._write_output_controls(f)
-            f.write('END\n')
+            self._write_friction(f)
+            self._write_solution_controls(f)
+            self._write_time_controls(f)
+
+            # End
+            self._write(f, 'END')
         return out
 
-    def _write_constituents(self, f):
-        f.write('! Constituent Properties\n')
-        for c in self.cfg.get('constituents', []):
-            params = ' '.join(map(str, c['params']))
-            f.write(f"CN {c['type']} \"{c['name']}\" {params}\n")
-        f.write('\n')
-
-    def _write_global_material(self, f):
-        f.write('! Global Material Properties\n')
-        for key, vals in self.cfg.get('global_material', {}).items():
-            f.write(f"MP {key} {' '.join(map(str, vals))}\n")
-        f.write('\n')
-        
-    def _write_materials(self, f):
-        """
-        Write out MP cards grouped by region, with a blank line
-        between each region’s block.
-        Expects cfg['materials'] as:
-          region_id:
-            - type: XXX
-              params: [...]
-            - type: YYY
-              params: [...]
-        """
-        f.write('! Material Properties\n')
-        mbR = self.cfg.get('materials', {})
-        for region, mats in mbR.items():
-            for m in mats:
-                params = ' '.join(map(str, m['params']))
-                f.write(f"MP {m['type']} {int(region)} {params}\n")
-            # blank line after each region block
-            f.write('\n')
-        # extra blank line before next section
-        f.write('\n')
-
+    def _write_operation(self, f):
+        cfg = self.bc_cfg.get('operation', {})
+        self._write(f, '! Operation Parameters')
+        for key, vals in cfg.items():
+            line = f"OP {key}" if not vals else f"OP {key} " + ' '.join(map(str, vals))
+            self._write(f, line)
+        self._write(f)
 
     def _write_iteration(self, f):
-        f.write('! Iteration Parameters\n')
-        for key, vals in self.cfg.get('iteration', {}).items():
-            f.write(f"IP {key} {' '.join(map(str, vals))}\n")
-        f.write('\n')
+        cfg = self.bc_cfg.get('iteration', {})
+        self._write(f, '! Iteration Parameters')
+        for key, vals in cfg.items():
+            self._write(f, f"IP {key} " + ' '.join(map(str, vals)))
+        self._write(f)
 
-    def _write_operation(self, f):
-        f.write('! Operation Parameters\n')
-        for key, vals in self.cfg.get('operation', {}).items():
-            if vals is None:
-                f.write(f"OP {key}\n")
-            else:
-                f.write(f"OP {key} {' '.join(map(str, vals))}\n")
-        f.write('\n')
-        
-    def _write_string_structures(self, f, boundary_loops):
-        """
-        Emit:
-          MTS <string_id> <material_region>
-        for every entry in cfg['boundary_strings']['MTS'],
-        then
-          EGS <n1> <n2> <string_id>
-        for each edge in each loop, starting string_id
-        at (max_mts_id + 1), (max_mts_id + 2), …
-        """
-        f.write('! String Structures\n')
+    def _write_constituents(self, f):
+        cfg = self.bc_cfg.get('constituents', [])
+        self._write(f, '! Constituent Properties')
+        for c in cfg:
+            params = ' '.join(map(str, c.get('params', [])))
+            self._write(f, f"CN {c['type']} \"{c.get('name','')}\" {params}")
+        self._write(f)
 
-        # 1) write out all MTS cards
-        mts_cfg = self.cfg.get('boundary_strings', {}).get('MTS', [])
-        # ensure ints
-        mts_entries = [(int(sid), int(region)) for sid, region in mts_cfg]
-        for sid, region in mts_entries:
-            f.write(f"MTS {sid} {region}\n")
+    def _write_global_material(self, f):
+        cfg = self.bc_cfg.get('global_material', {})
+        self._write(f, '! Global Material Properties')
+        for key, vals in cfg.items():
+            self._write(f, f"MP {key} " + ' '.join(map(str, vals)))
+        self._write(f)
 
-        # find the highest string ID used so far
-        max_mts_id = max((sid for sid, _ in mts_entries), default=0)
+    def _write_materials(self, f):
+        cfg = self.bc_cfg.get('materials', {})
+        self._write(f, '! Material Properties')
+        for region, mats in cfg.items():
+            for m in mats:
+                params = ' '.join(map(str, m.get('params', [])))
+                self._write(f, f"MP {m['type']} {region} {params} ! Name: Material {region}")
+            self._write(f)
+        self._write(f)
 
-        # 2) now write each boundary‐loop as an EGS string,
-        #    starting at max_mts_id + 1
-        for loop_idx, (nodes, _) in enumerate(boundary_loops, start=1):
-            string_id = max_mts_id + loop_idx
-            arr = np.asarray(nodes, dtype=int)
-            # pair arr[0]→arr[1], arr[1]→arr[2], … arr[-2]→arr[-1]
-            for n1, n2 in zip(arr, arr[1:]):
-                f.write(f"EGS {n1+1} {n2+1} {string_id}\n")
+    def _write_boundary_strings(self, f, mesh):
+        bc = self.bc_cfg
+        materials = bc.get('materials', {})
+        # Collect material IDs (region numbers)
+        mat_ids = sorted(int(r) for r in materials.keys())
 
-        f.write('\n')
+        names = bc['edge_string_names']
 
-    
+        # Pull grid dimensions
+        eta = getattr(self.curvi, 'eta', None)
+        nv = getattr(self.curvi, 'nv', None)
+        if eta is None or nv is None:
+            raise ConfigError("CurviMeshBuilder must have eta and nv attributes for boundary strings.")
+        # first and last columns (short sides)
+        edges = [list(range(0, eta * nv, nv)), list(range(nv - 1, eta * nv, nv))]
+
+        # Interactive prompt for edge selection
+        fig, ax = plt.subplots()
+        verts = mesh.vertices
+        for idx, nodes in enumerate(edges):
+            pts = np.array([verts[n][:2] for n in nodes])
+            ax.plot(pts[:, 0], pts[:, 1], '-', color=['r', 'b'][idx])
+        ax.set_title(f"Click on the '{names[0]}' edge to assign its boundary string")
+        picked = []
+        def on_click(evt):
+            pts0 = np.array([verts[n][:2] for n in edges[0]])
+            pts1 = np.array([verts[n][:2] for n in edges[1]])
+            d0 = np.min(np.hypot(*(pts0 - (evt.xdata, evt.ydata)).T))
+            d1 = np.min(np.hypot(*(pts1 - (evt.xdata, evt.ydata)).T))
+            picked.append(0 if d0 < d1 else 1)
+            plt.close(fig)
+        fig.canvas.mpl_connect('button_press_event', on_click)
+        plt.show()
+
+        # Determine selected and secondary boundaries
+        sel = picked[0]
+        primary_name, secondary_name = names[0], names[1]
+        primary_nodes = edges[sel]
+        secondary_nodes = edges[1 - sel]
+
+        # Header for boundary strings
+        self._write(f, '! Boundary Strings')
+
+        # Write one MTS per material region (MTS regionID regionID)
+        for mid in mat_ids:
+            self._write(f, f"MTS {mid} {mid}")
+
+        # Compute starting EGS ID as last material ID + 1
+        last_mat_id = mat_ids[-1] if mat_ids else 0
+
+        # Write EGS for each boundary string in config order
+        for idx, (name, nodes) in enumerate(((primary_name, primary_nodes), (secondary_name, secondary_nodes)), start=1):
+            sid = last_mat_id + idx
+            self._write(f, f"! EGS for {name}")
+            for a, b in zip(nodes[:-1], nodes[1:]):
+                self._write(f, f"EGS {a+1} {b+1} {sid}")
+            # Save for solution controls
+            self.string_map[name] = sid
+
+        self._write(f)
+
+
+
+
+
+
+
     def _write_time_series(self, f):
-        ts_list = self.cfg.get('time_series', [])
-        if not ts_list:
+        cfg = self.bc_cfg.get('time_series', [])
+        if not cfg:
             return
-    
-        f.write('! Time Series\n')
-        for ts in ts_list:
-            # pick up your BC-series identifiers
-            stype    = ts.get('series_type',
-                        ts.get('bc_type',
-                        ts.get('type_id', 1)))
-            sid      = ts.get('id',
-                        ts.get('series_id'))
-            in_units = ts.get('in_units',
-                        ts.get('input_units', 0))
-            out_units= ts.get('out_units',
-                        ts.get('output_units', 0))
-    
-            # either a list of [t,v] pairs or a path to a text file
-            raw = ts.get('points',
-                  ts.get('data', []))
-    
-            # if it's a filename, read it in
+        self._write(f, '! Time Series')
+        for ts in cfg:
+            stype = ts.get('series_type', 'XY1')
+            sid = ts.get('id')
+            in_u = ts.get('in_units', 0)
+            out_u = ts.get('out_units', 0)
+            raw = ts.get('file') if 'file' in ts else ts.get('points', [])
+            pts = []
             if isinstance(raw, str):
-                file_path = Path(raw)
-                pts = []
-                with file_path.open() as fp:
-                    for line in fp:
-                        line = line.strip()
-                        if not line or line.startswith('#'):
-                            continue
-                        parts = line.split()
-                        if len(parts) < 2:
-                            continue
-                        t, v = map(float, parts[:2])
-                        pts.append((t, v))
+                for line in Path(raw).open():
+                    nums = re.findall(r'[-+]?\d*\.\d+|[-+]?\d+', line)
+                    if len(nums) >= 2:
+                        pts.append(tuple(map(float, nums[:2])))
             else:
-                # assume iterable of two-tuples
                 pts = [(float(t), float(v)) for t, v in raw]
-    
-            npts = len(pts)
-            f.write(f"XY1 {stype} {sid} {npts} {in_units} {out_units}\n")
+            self._write(f, f"{stype} {sid} {in_u} {out_u} {len(pts)}")
             for t, v in pts:
-                f.write(f"{t:.2f} {v:.2f}\n")
-            
-            f.write("\n")
-        f.write('\n')
-
-
-
-    def _write_solution_controls(self, f):
-        f.write('! Solution Controls\n')
-        for k, vals in self.cfg.get('db', {}).items():
-            f.write(f"DB {k} {' '.join(map(str, vals))}\n")
-        for k, vals in self.cfg.get('nb', {}).items():
-            f.write(f"NB {k} {' '.join(map(str, vals))}\n")
-        f.write('\n')
-
-    def _write_friction(self, f):
-        f.write('! Friction Controls\n')
-        for key, entries in self.cfg.get('friction', {}).items():
-            for e in entries:
-                f.write(f"FR {key} {e['region']} " + ' '.join(map(str, e['params'])) + "\n")
-        f.write('\n')
-
-    def _write_time_controls(self, f):
-        f.write('! Time Controls\n')
-        for key, vals in self.cfg.get('time_controls', {}).items():
-            f.write(f"TC {key} {' '.join(map(str, vals))}\n")
-        f.write('\n')
+                self._write(f, f"{t:.2f} {v:.2f}")
+            self._write(f)
+        self._write(f)
 
     def _write_output_controls(self, f):
-        f.write('! Output Control\n')
-        for key, vals in self.cfg.get('output_control', {}).items():
-            f.write(f"{key} {' '.join(map(str, vals))}\n")
-        f.write('\n')
+        cfg = self.bc_cfg.get('output_control', {})
+        self._write(f, '! Output Controls')
+        for key, items in cfg.items():
+            for it in items:
+                if key == 'OS':
+                    unit = it.get('unit', 0)
+                    self._write(f, f"OS {it['series']} {len(it['segments'])} {unit}")
+                    for seg in it['segments']:
+                        self._write(f, ' '.join(map(str, seg)))
+                else:
+                    sid = it if isinstance(it, (int, str)) else it.get('series')
+                    self._write(f, f"{key} {sid}")
+        self._write(f)
+
+    def _write_friction(self, f):
+        cfg = self.bc_cfg.get('friction', {})
+        self._write(f, '! Friction Controls')
+        for key, entries in cfg.items():
+            for e in entries:
+                self._write(f, f"FR {key} {e['region']} " + ' '.join(map(str, e['params'])))
+        self._write(f)
+
+    def _write_solution_controls(self, f):
+        """
+        Write Dirichlet (DB) and Neumann (NB) boundary conditions based on the config:
+          db:
+            <BC-type>:
+              - string: <name>
+                series: [<series-IDs>]
+          nb:
+            <BC-type>:
+              - string: <name>
+                series: [<series-IDs>]
+        """
+        cfg = self.bc_cfg
+        self._write(f, '! Solution Controls')
+        for sect in ['db','nb']:
+            card = sect.upper()             # "DB" or "NB"
+            for bc_type, specs in cfg.get(sect, {}).items():
+                for spec in specs:
+                    name = spec['string']
+                    sid  = self.string_map.get(name)
+                    if sid is None:
+                        raise KeyError(f"No ID for '{name}', got map: {self.string_map}")
+                    for series in spec['series']:
+                        self._write(f, f"{card} {bc_type} {sid} {series}")
+
+
+
+    def _write_time_controls(self, f):
+        cfg = self.bc_cfg.get('time_controls', {})
+        self._write(f, '! Time Controls')
+        for key, vals in cfg.items():
+            self._write(f, f"TC {key} " + ' '.join(map(str, vals)))
+        self._write(f)
